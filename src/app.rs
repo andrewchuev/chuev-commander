@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Command line
@@ -21,6 +21,11 @@ use tracing::{info, warn};
 pub struct CmdLine {
     /// Text currently in the input field.
     pub input: String,
+    /// Byte offset of the cursor within `input` (always on a char boundary).
+    pub cursor_pos: usize,
+    /// Byte offset of the selection anchor; `None` = no selection.
+    /// The selection spans `min(anchor, cursor_pos)..max(anchor, cursor_pos)`.
+    pub selection_anchor: Option<usize>,
     /// Command history, oldest first.  Loaded from disk on startup.
     pub history: Vec<String>,
     /// `None` = showing live input.  `Some(i)` = browsing history entry `i`.
@@ -38,34 +43,107 @@ impl Default for CmdLine {
 impl CmdLine {
     pub fn new() -> Self {
         Self {
-            input:       String::new(),
-            history:     Self::load_history(),
-            history_idx: None,
-            saved_input: String::new(),
+            input:            String::new(),
+            cursor_pos:       0,
+            selection_anchor: None,
+            history:          Self::load_history(),
+            history_idx:      None,
+            saved_input:      String::new(),
         }
     }
 
-    /// Append a character; exits history-browsing mode.
+    /// Insert a character at the current cursor position; exits history-browsing mode.
     pub fn push_char(&mut self, c: char) {
-        self.history_idx = None;
-        self.input.push(c);
+        self.history_idx    = None;
+        self.selection_anchor = None;
+        self.input.insert(self.cursor_pos, c);
+        self.cursor_pos += c.len_utf8();
     }
 
-    /// Delete the last character.  Returns `false` if input was already empty.
-    pub fn backspace(&mut self) -> bool {
+    /// Insert a string at the cursor position.
+    pub fn insert_str(&mut self, s: &str) {
+        self.selection_anchor = None;
+        self.input.insert_str(self.cursor_pos, s);
+        self.cursor_pos += s.len();
+    }
+
+    /// Delete the character at the cursor position (forward delete).
+    pub fn delete_forward(&mut self) {
         self.history_idx = None;
-        if self.input.is_empty() {
+        self.selection_anchor = None;
+        if self.cursor_pos >= self.input.len() { return; }
+        self.input.remove(self.cursor_pos);
+    }
+
+    /// Delete the character immediately before the cursor.
+    /// Returns `false` if the cursor was already at the start.
+    pub fn backspace(&mut self) -> bool {
+        self.history_idx    = None;
+        self.selection_anchor = None;
+        if self.cursor_pos == 0 {
             return false;
         }
-        self.input.pop();
+        let before = &self.input[..self.cursor_pos];
+        let (byte_idx, _) = before.char_indices().next_back().unwrap();
+        self.input.remove(byte_idx);
+        self.cursor_pos = byte_idx;
         true
     }
 
     /// Clear input and exit history-browsing mode.
     pub fn clear(&mut self) {
         self.input.clear();
-        self.history_idx = None;
+        self.cursor_pos   = 0;
+        self.selection_anchor = None;
+        self.history_idx  = None;
         self.saved_input.clear();
+    }
+
+    /// Move the cursor one character to the left, clearing any selection.
+    pub fn move_cursor_left(&mut self) {
+        self.selection_anchor = None;
+        if self.cursor_pos == 0 { return; }
+        let before = &self.input[..self.cursor_pos];
+        self.cursor_pos = before.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+    }
+
+    /// Move the cursor one character to the right, clearing any selection.
+    pub fn move_cursor_right(&mut self) {
+        self.selection_anchor = None;
+        if self.cursor_pos >= self.input.len() { return; }
+        let ch = self.input[self.cursor_pos..].chars().next().unwrap();
+        self.cursor_pos += ch.len_utf8();
+    }
+
+    /// Extend (or start) the selection one character to the left.
+    pub fn select_left(&mut self) {
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_pos);
+        }
+        if self.cursor_pos == 0 { return; }
+        let before = &self.input[..self.cursor_pos];
+        self.cursor_pos = before.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+    }
+
+    /// Extend (or start) the selection one character to the right.
+    pub fn select_right(&mut self) {
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_pos);
+        }
+        if self.cursor_pos >= self.input.len() { return; }
+        let ch = self.input[self.cursor_pos..].chars().next().unwrap();
+        self.cursor_pos += ch.len_utf8();
+    }
+
+    /// Returns the currently selected text, or `None` when there is no selection.
+    pub fn selected_text(&self) -> Option<&str> {
+        let anchor = self.selection_anchor?;
+        let (start, end) = if anchor <= self.cursor_pos {
+            (anchor, self.cursor_pos)
+        } else {
+            (self.cursor_pos, anchor)
+        };
+        if start == end { None } else { Some(&self.input[start..end]) }
     }
 
     /// Scroll to the previous (older) history entry.
@@ -80,8 +158,10 @@ impl CmdLine {
             Some(0) => return, // already at oldest entry
             Some(i) => i - 1,
         };
-        self.history_idx = Some(idx);
-        self.input = self.history[idx].clone();
+        self.history_idx     = Some(idx);
+        self.input           = self.history[idx].clone();
+        self.cursor_pos      = self.input.len();
+        self.selection_anchor = None;
     }
 
     /// Scroll to the next (newer) history entry, or back to the live input.
@@ -90,34 +170,31 @@ impl CmdLine {
         if idx + 1 < self.history.len() {
             let next = idx + 1;
             self.history_idx = Some(next);
-            self.input = self.history[next].clone();
+            self.input       = self.history[next].clone();
         } else {
             // Past the newest entry → restore live input
             self.history_idx = None;
-            self.input = self.saved_input.clone();
+            self.input       = self.saved_input.clone();
         }
+        self.cursor_pos      = self.input.len();
+        self.selection_anchor = None;
     }
 
-    /// Return the suffix of the most-recent history entry that starts with the
-    /// current `input`, or `None` if there is no such entry.
-    /// Used to render a "ghost" completion hint after the cursor.
-    pub fn history_hint(&self) -> Option<&str> {
-        if self.input.is_empty() || self.history_idx.is_some() {
-            return None;
-        }
-        let input = self.input.as_str();
+    /// Return all history entries that contain `query` as a substring (most-recent first).
+    /// When `query` is empty, returns the 20 most-recent entries.
+    pub fn history_matches(&self, query: &str) -> Vec<String> {
+        let q = query.to_lowercase();
         self.history.iter().rev()
-            .find(|h| h.starts_with(input) && h.len() > input.len())
-            .map(|h| &h[input.len()..])
+            .filter(|h| q.is_empty() || h.to_lowercase().contains(&q))
+            .take(20)
+            .cloned()
+            .collect()
     }
 
-    /// Complete the current input to the full hint entry (→ key).
-    pub fn accept_hint(&mut self) {
-        if let Some(hint_suffix) = self.history_hint() {
-            let full = format!("{}{}", self.input, hint_suffix);
-            self.input = full;
-            self.history_idx = None;
-        }
+    /// Remove an entry from history and save the file.
+    pub fn delete_entry(&mut self, entry: &str) {
+        self.history.retain(|h| h != entry);
+        self.save_history();
     }
 
     /// Take the current input, add it to history, clear the field.
@@ -125,7 +202,9 @@ impl CmdLine {
     pub fn take_input(&mut self) -> String {
         let cmd = self.input.trim().to_string();
         self.input.clear();
-        self.history_idx = None;
+        self.cursor_pos      = 0;
+        self.selection_anchor = None;
+        self.history_idx     = None;
         self.saved_input.clear();
 
         if !cmd.is_empty() {
@@ -196,7 +275,9 @@ mod cmdline_tests {
     #[test]
     fn backspace_removes_last_char() {
         let mut cl = CmdLine::new();
-        cl.input = "abc".into();
+        cl.push_char('a');
+        cl.push_char('b');
+        cl.push_char('c');
         let changed = cl.backspace();
         assert!(changed);
         assert_eq!(cl.input, "ab");
@@ -212,9 +293,10 @@ mod cmdline_tests {
     #[test]
     fn clear_resets_state() {
         let mut cl = CmdLine::new();
-        cl.input = "something".into();
+        for c in "something".chars() { cl.push_char(c); }
         cl.clear();
         assert!(cl.input.is_empty());
+        assert_eq!(cl.cursor_pos, 0);
     }
 
     /// history_prev should load the most-recent entry first.
@@ -238,7 +320,7 @@ mod cmdline_tests {
     #[test]
     fn history_next_restores_live_input() {
         let mut cl = with_history(&["cmd1", "cmd2"]);
-        cl.input = "draft".into();
+        for c in "draft".chars() { cl.push_char(c); }
         cl.history_prev();
         cl.history_next();
         assert_eq!(cl.input, "draft");
@@ -389,9 +471,9 @@ impl PanelState {
         self.quick_search.clear();
         self.search_mode = false;
         self.selected_names.clear();
+        // apply_filter_sort preserves the cursor on the same entry name when
+        // reloading the same directory; it falls back to 0 on a new directory.
         self.apply_filter_sort();
-        self.selected_index = 0;
-        self.scroll_offset  = 0;
     }
 
     // ── Filtering / sorting ───────────────────────────────────────────────
@@ -685,11 +767,51 @@ pub enum Popup {
         sub_idx: usize,
         open:    bool,
     },
+    /// Folder bookmarks manager (Ctrl+B).
+    BookmarkManager {
+        entries:  Vec<(u8, PathBuf)>,
+        selected: usize,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deferred I/O
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An I/O operation that requires resources only available in `main.rs`
+/// (the `Terminal` handle for TUI suspension, or `arboard::Clipboard`).
+///
+/// `App::update` sets `App::pending_action`; the event loop checks it on each
+/// iteration and performs the actual work before the next frame.  At most one
+/// action can be pending — the last `update()` call in an iteration wins.
+#[derive(Debug)]
+pub enum PendingAction {
+    /// Suspend the TUI and open the file in `$VISUAL` / `$EDITOR`.
+    Edit(PathBuf),
+    /// Suspend the TUI and run this shell command through a PTY.
+    Shell { cmd: String, cwd: PathBuf },
+    /// Write this text to the system clipboard.
+    ClipboardCopy(String),
+    /// Read the system clipboard and insert its text into the command line.
+    ClipboardPaste,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// History-suggestion overlay (non-modal)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// State for the command-history suggestion overlay.
+///
+/// Deliberately **not** on `popup_stack` — see the doc-comment on
+/// [`App::history_popup`] for the architectural reasoning.
+#[derive(Debug, Default)]
+pub struct HistoryPopupState {
+    pub selected_idx: usize,
+}
 
 pub struct App {
     pub left_panel:  PanelState,
@@ -704,13 +826,9 @@ pub struct App {
     pub popup_stack: Vec<Popup>,
     pub should_quit: bool,
 
-    /// Set by the F4 handler; cleared and acted on by the event loop in
-    /// `main.rs` which has access to the `Terminal` needed for suspend/restore.
-    pub pending_edit: Option<PathBuf>,
-
-    /// Set when the user presses Enter with a non-empty command line.
-    /// Cleared and acted on by the event loop in `main.rs`.
-    pub pending_shell: Option<(String, PathBuf)>,
+    /// I/O operation deferred to the event loop in `main.rs`.
+    /// See [`PendingAction`] for the full set of variants and rationale.
+    pub pending_action: Option<PendingAction>,
 
     /// Accumulated output of all executed shell commands.
     /// Rendered in the panels area when panels are hidden (Ctrl+O).
@@ -733,16 +851,37 @@ pub struct App {
     /// (panels fill everything).  Ctrl+Down shrinks, Ctrl+Up grows.
     pub panels_height_percent: u16,
 
-    /// Text to copy to the system clipboard on the next event-loop iteration.
-    /// Clipboard I/O happens in `main.rs` which owns the `arboard::Clipboard`.
-    pub pending_clipboard_copy: Option<String>,
-    /// When `true`, the event loop should read from the clipboard and append
-    /// its text to the command line.
-    pub pending_clipboard_paste: bool,
 
     /// Screen rectangles of the main areas, updated by the render pass.
     /// Used by `handle_mouse` to map click coordinates to panel entries.
     pub layout: LayoutCache,
+
+    /// Folder bookmarks 0–9: `Some(path)` when set, `None` when empty.
+    /// Persisted to `config_dir/chuev-commander/bookmarks`.
+    pub bookmarks: [Option<PathBuf>; 10],
+
+    // ── Two distinct overlay / popup mechanisms ───────────────────────────
+    //
+    // 1. `popup_stack` — modal layers that capture *all* keyboard input.
+    //    Only the topmost entry is rendered and receives events.  Used for
+    //    error dialogs, confirm dialogs, file viewer, menu, progress bars,
+    //    bookmark manager.
+    //
+    // 2. `history_popup` — a non-modal overlay that *coexists* with the
+    //    command line.  The cmdline remains editable while it is visible; it
+    //    auto-appears/disappears based on the current input and is dismissed
+    //    with Esc without losing the typed text.
+    //
+    // The split is intentional: putting the history overlay on the modal
+    // stack would require pausing cmdline input while it is open, breaking
+    // the "type and see suggestions" interaction model.
+
+    /// Live history-suggestion overlay (`None` = hidden).
+    pub history_popup: Option<HistoryPopupState>,
+    /// Cmdline text at the moment the user last pressed Esc to dismiss the
+    /// history overlay.  The overlay will not auto-reopen while
+    /// `cmdline.input == history_popup_closed_for`.
+    history_popup_closed_for: String,
 
     /// Sender half of the AppEvent channel — cloned into spawned I/O tasks.
     tx:       EventSender,
@@ -769,21 +908,22 @@ impl App {
             left_panel_width_percent: 50,
             popup_stack:              Vec::new(),
             should_quit:              false,
-            pending_edit:             None,
-            pending_shell:            None,
+            pending_action:           None,
             output_buffer:            Vec::new(),
             output_scroll:            0,
             cmdline:                  CmdLine::new(),
             cancel_token:             None,
             theme:                    Theme::from_kind(ThemeKind::Blue),
             panels_height_percent:    100,
-            pending_clipboard_copy:   None,
-            pending_clipboard_paste:  false,
             layout:                   LayoutCache::default(),
+            bookmarks:                 std::array::from_fn(|_| None),
+            history_popup:             None,
+            history_popup_closed_for:  String::new(),
             tx,
             provider,
         };
         app.load_panel_state();
+        app.load_bookmarks();
         Ok(app)
     }
 
@@ -793,16 +933,20 @@ impl App {
         // Global shortcuts work regardless of popup / search state
         if action == Action::TogglePanelsVisible {
             let any_visible = self.left_panel_visible || self.right_panel_visible;
-            self.left_panel_visible  = !any_visible;
-            self.right_panel_visible = !any_visible;
+            let new_vis = !any_visible;
+            self.left_panel_visible  = new_vis;
+            self.right_panel_visible = new_vis;
+            debug!(panels_visible = new_vis, "panels: toggled");
             return;
         }
         if action == Action::PanelHeightGrow {
             self.panels_height_percent = (self.panels_height_percent + 10).min(100);
+            debug!(pct = self.panels_height_percent, "panels: height grew");
             return;
         }
         if action == Action::PanelHeightShrink {
             self.panels_height_percent = self.panels_height_percent.saturating_sub(10).max(10);
+            debug!(pct = self.panels_height_percent, "panels: height shrunk");
             return;
         }
 
@@ -889,24 +1033,27 @@ impl App {
                     PanelSide::Left  => PanelSide::Right,
                     PanelSide::Right => PanelSide::Left,
                 };
-                info!(panel = ?self.active_panel, "focus switched");
+                debug!(panel = ?self.active_panel, "panel: focus switched");
             }
 
             // ── Cursor movement ───────────────────────────────────────────
-            // Up / Down: navigate history if cmdline has content, otherwise
-            // move panel cursor.
+            // Up/Down: navigate history popup when it is open, otherwise move panel.
             Action::MoveUp => {
-                if self.cmdline.input.is_empty() {
-                    self.active_panel_mut().move_up();
+                if let Some(ref mut p) = self.history_popup {
+                    p.selected_idx = p.selected_idx.saturating_sub(1);
                 } else {
-                    self.cmdline.history_prev();
+                    self.active_panel_mut().move_up();
                 }
             }
             Action::MoveDown => {
-                if self.cmdline.input.is_empty() {
-                    self.active_panel_mut().move_down();
+                if self.history_popup.is_some() {
+                    let n = self.cmdline.history_matches(&self.cmdline.input.clone()).len();
+                    if let Some(ref mut p) = self.history_popup {
+                        let max = n.saturating_sub(1);
+                        if p.selected_idx < max { p.selected_idx += 1; }
+                    }
                 } else {
-                    self.cmdline.history_next();
+                    self.active_panel_mut().move_down();
                 }
             }
             Action::PageUp   => { self.active_panel_mut().page_up(20); }
@@ -915,31 +1062,50 @@ impl App {
             Action::End      => { self.active_panel_mut().end(); }
 
             // ── Navigation ────────────────────────────────────────────────
-            // Enter: execute cmdline command if non-empty, else navigate into.
+            // Enter: insert from history popup when open; else execute cmdline or navigate.
             Action::NavigateInto => {
-                if self.cmdline.input.is_empty() {
+                if self.history_popup.is_some() {
+                    let input   = self.cmdline.input.clone();
+                    let matches = self.cmdline.history_matches(&input);
+                    let idx     = self.history_popup.as_ref().map(|p| p.selected_idx).unwrap_or(0);
+                    if let Some(cmd) = matches.get(idx) {
+                        let cmd = cmd.clone();
+                        debug!(cmd = %cmd, "history popup: command selected");
+                        self.cmdline.clear();
+                        self.cmdline.insert_str(&cmd);
+                    }
+                    self.history_popup = None;
+                    self.history_popup_closed_for = self.cmdline.input.clone();
+                } else if self.cmdline.input.is_empty() {
                     self.navigate_into();
                 } else {
                     let cmd = self.cmdline.take_input();
-                    let cwd = match &self.active_panel().current_path {
-                        VfsPath::Local(p) => Some(p.clone()),
-                        _ => None,
-                    };
-                    if let Some(cwd) = cwd {
-                        self.pending_shell = Some((cmd, cwd));
+                    if let VfsPath::Local(cwd) = self.active_panel().current_path.clone() {
+                        info!(cmd = %cmd, cwd = %cwd.display(), "shell: command enqueued");
+                        self.pending_action = Some(PendingAction::Shell { cmd, cwd });
                     }
                 }
             }
-            // Backspace: always deletes the last cmdline character (command line first).
-            // Navigate up via Enter on the ".." entry.
+            // Backspace: delete last cmdline character and refresh history popup.
             Action::NavigateUp => {
+                self.history_popup_closed_for.clear();
                 self.cmdline.backspace();
+                self.update_history_popup();
             }
 
             // ── Sorting ───────────────────────────────────────────────────
-            Action::SortByName => self.active_panel_mut().toggle_sort(SortColumn::Name),
-            Action::SortBySize => self.active_panel_mut().toggle_sort(SortColumn::Size),
-            Action::SortByDate => self.active_panel_mut().toggle_sort(SortColumn::Modified),
+            Action::SortByName => {
+                debug!(panel = ?self.active_panel, "sort: by name");
+                self.active_panel_mut().toggle_sort(SortColumn::Name);
+            }
+            Action::SortBySize => {
+                debug!(panel = ?self.active_panel, "sort: by size");
+                self.active_panel_mut().toggle_sort(SortColumn::Size);
+            }
+            Action::SortByDate => {
+                debug!(panel = ?self.active_panel, "sort: by date");
+                self.active_panel_mut().toggle_sort(SortColumn::Modified);
+            }
 
             // ── Filtering / search ────────────────────────────────────────
             Action::ToggleHidden => self.active_panel_mut().toggle_hidden(),
@@ -950,58 +1116,163 @@ impl App {
                 self.active_panel_mut().enter_search_mode();
             }
 
-            // Typed characters always go to the command line (Variant A)
-            Action::CmdlineChar(c) => self.cmdline.push_char(c),
+            // Typed characters go to cmdline; refresh history popup afterwards.
+            Action::CmdlineChar(c) => {
+                self.history_popup_closed_for.clear();
+                self.cmdline.push_char(c);
+                self.update_history_popup();
+            }
 
-            // Esc: clear cmdline if non-empty
-            Action::PopupClose => { self.cmdline.clear(); }
+            // Esc: close history popup if open; else clear cmdline.
+            Action::PopupClose => {
+                if self.history_popup.is_some() {
+                    self.history_popup_closed_for = self.cmdline.input.clone();
+                    self.history_popup = None;
+                } else {
+                    self.cmdline.clear();
+                }
+            }
 
             // ── Command-line helpers ──────────────────────────────────────
             Action::CmdlineInsertName => {
                 if let Some(entry) = self.active_panel().selected_entry() {
                     if entry.name != ".." {
                         let name = entry.name.clone();
-                        if !self.cmdline.input.is_empty()
-                            && !self.cmdline.input.ends_with(' ')
-                        {
-                            self.cmdline.input.push(' ');
+                        // Insert a space separator if needed
+                        let need_space = !self.cmdline.input.is_empty()
+                            && self.cmdline.cursor_pos > 0
+                            && !self.cmdline.input[..self.cmdline.cursor_pos].ends_with(' ');
+                        if need_space {
+                            self.cmdline.insert_str(" ");
                         }
-                        self.cmdline.input.push_str(&name);
+                        self.cmdline.insert_str(&name);
                     }
                 }
             }
-            Action::CmdlineClear => self.cmdline.clear(),
+            Action::CmdlineClear => {
+                self.history_popup = None;
+                self.history_popup_closed_for.clear();
+                self.cmdline.clear();
+            }
+
+            // Delete key: forward-delete the character at the cursor.
+            Action::CmdlineDeleteForward => {
+                self.history_popup_closed_for.clear();
+                self.cmdline.delete_forward();
+                self.update_history_popup();
+            }
+
+            // Shift+Delete: remove selected history entry from history.
+            Action::HistoryDeleteEntry => {
+                if self.history_popup.is_some() {
+                    let input   = self.cmdline.input.clone();
+                    let matches = self.cmdline.history_matches(&input);
+                    let idx     = self.history_popup.as_ref().map(|p| p.selected_idx).unwrap_or(0);
+                    if let Some(entry) = matches.get(idx) {
+                        let entry = entry.clone();
+                        self.cmdline.delete_entry(&entry);
+                    }
+                    self.update_history_popup();
+                }
+            }
+
+            // ── Insert absolute path of current entry into cmdline ────────────
+            Action::CmdlineInsertPath => {
+                let panel = self.active_panel();
+                let path_str = match panel.selected_entry() {
+                    Some(e) if e.name != ".." => path_to_string(&e.path),
+                    _ => path_to_string(&panel.current_path),
+                };
+                let need_space = !self.cmdline.input.is_empty()
+                    && self.cmdline.cursor_pos > 0
+                    && !self.cmdline.input[..self.cmdline.cursor_pos].ends_with(' ');
+                if need_space { self.cmdline.insert_str(" "); }
+                self.cmdline.insert_str(&path_str);
+            }
+
+            // ── Copy absolute path to clipboard (no selection/mark logic) ────
+            Action::CopyAbsPathToClipboard => {
+                let panel = self.active_panel();
+                let path_str = match panel.selected_entry() {
+                    Some(e) if e.name != ".." => path_to_string(&e.path),
+                    _ => path_to_string(&panel.current_path),
+                };
+                self.pending_action = Some(PendingAction::ClipboardCopy(path_str));
+            }
+
+            // ── Bookmarks ─────────────────────────────────────────────────
+            Action::BookmarkGoto(n) => {
+                let path = self.bookmarks[n as usize].clone();
+                if let Some(p) = path {
+                    info!(slot = n, path = %p.display(), "bookmark: goto");
+                    self.navigate_active_to(p);
+                } else {
+                    debug!(slot = n, "bookmark: slot empty — showing error");
+                    self.push_error(format!(
+                        "Bookmark {} is not set.  Press Ctrl+Shift+{} to save the current folder.",
+                        n, n
+                    ));
+                }
+            }
+
+            Action::BookmarkSet(n) => {
+                if let VfsPath::Local(ref p) = self.active_panel().current_path.clone() {
+                    info!(slot = n, path = %p.display(), "bookmark: set");
+                    self.bookmarks[n as usize] = Some(p.clone());
+                    self.save_bookmarks();
+                }
+            }
+
+            Action::OpenBookmarkManager => {
+                let entries: Vec<(u8, PathBuf)> = self.bookmarks.iter()
+                    .enumerate()
+                    .filter_map(|(i, opt)| opt.as_ref().map(|p| (i as u8, p.clone())))
+                    .collect();
+                debug!(count = entries.len(), "bookmark manager: opened");
+                self.popup_stack.push(Popup::BookmarkManager { entries, selected: 0 });
+            }
 
             // ── Refresh ───────────────────────────────────────────────────
             Action::Refresh => {
+                debug!(panel = ?self.active_panel, "panel: manual refresh");
                 let provider = Arc::clone(&self.provider);
                 self.active_panel_mut().load(provider.as_ref());
             }
 
             // ── File operations ───────────────────────────────────────────
             Action::Edit => {
-                // F4: request the event loop to open the selected file in
-                // $VISUAL / $EDITOR.  We only set a flag here because
-                // terminal suspend/restore requires the Terminal handle,
-                // which lives in main.rs, not in App.
                 let entry = self.active_panel().selected_entry().cloned();
                 if let Some(entry) = entry {
-                    // Don't try to edit ".." or directories
                     if !entry.is_dir {
                         if let VfsPath::Local(ref p) = entry.path {
-                            self.pending_edit = Some(p.clone());
+                            info!(path = %p.display(), "editor: enqueuing");
+                            self.pending_action = Some(PendingAction::Edit(p.clone()));
                         }
                     }
                 }
             }
 
-            Action::Select => self.active_panel_mut().toggle_select(),
+            Action::Select => {
+                let name = self.active_panel().selected_entry().map(|e| e.name.clone());
+                trace!(entry = ?name, "select: toggled");
+                self.active_panel_mut().toggle_select();
+            }
 
-            Action::Copy => self.start_copy_move(false),
-            Action::Move => self.start_copy_move(true),
-            Action::CreateArchive => self.start_create_archive(),
+            Action::Copy => {
+                debug!(panel = ?self.active_panel, "copy: F5 pressed");
+                self.start_copy_move(false);
+            }
+            Action::Move => {
+                debug!(panel = ?self.active_panel, "move: F6 pressed");
+                self.start_copy_move(true);
+            }
+            Action::CreateArchive => {
+                debug!(panel = ?self.active_panel, "archive: create triggered");
+                self.start_create_archive();
+            }
 
             Action::MakeDir => {
+                debug!(panel = ?self.active_panel, "mkdir: popup opened");
                 self.popup_stack.push(Popup::Input {
                     title:      "Make Directory".into(),
                     prompt:     "Directory name:".into(),
@@ -1023,6 +1294,8 @@ impl App {
                 } else {
                     format!("Delete {} marked items?", marked.len())
                 };
+                let count = if marked.is_empty() { 1 } else { marked.len() };
+                debug!(count, "delete: confirm popup opened");
                 self.popup_stack.push(Popup::Confirm {
                     title:             "Delete".into(),
                     message,
@@ -1055,10 +1328,17 @@ impl App {
                 if let Some(entry) = entry {
                     if !entry.is_dir && entry.name != ".." {
                         const MAX: usize = 1 << 20; // 1 MiB
+                        debug!(file = %entry.name, "viewer: opening");
                         match self.provider.read_file(&entry.path) {
                             Ok(mut raw) => {
                                 let truncated = raw.len() > MAX;
                                 raw.truncate(MAX);
+                                info!(
+                                    file    = %entry.name,
+                                    bytes   = raw.len(),
+                                    truncated,
+                                    "viewer: loaded"
+                                );
                                 let title = if truncated {
                                     format!("{} [truncated at 1 MiB]", entry.name)
                                 } else {
@@ -1092,6 +1372,12 @@ impl App {
             }
 
             Action::CopyToClipboard => {
+                // Active cmdline selection takes priority over file paths.
+                if let Some(sel) = self.cmdline.selected_text() {
+                    debug!(bytes = sel.len(), "clipboard: copying cmdline selection");
+                    self.pending_action = Some(PendingAction::ClipboardCopy(sel.to_owned()));
+                    return;
+                }
                 let panel  = self.active_panel();
                 let marked = panel.marked_entries();
                 let text   = if marked.is_empty() {
@@ -1100,25 +1386,28 @@ impl App {
                         _ => return,
                     }
                 } else {
-                    marked
-                        .iter()
-                        .map(|e| path_to_string(&e.path))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    marked.iter().map(|e| path_to_string(&e.path)).collect::<Vec<_>>().join("\n")
                 };
-                self.pending_clipboard_copy = Some(text);
+                self.pending_action = Some(PendingAction::ClipboardCopy(text));
             }
 
             Action::PasteFromClipboard => {
-                self.pending_clipboard_paste = true;
+                self.pending_action = Some(PendingAction::ClipboardPaste);
             }
 
-            Action::MoveLeft => {}
+            // Left arrow: move the cmdline cursor one char left.
+            Action::MoveLeft => {
+                self.cmdline.move_cursor_left();
+            }
 
-            // Right arrow: accept history hint if one is visible, otherwise no-op.
+            // Right arrow: move the cursor one character to the right.
             Action::MoveRight => {
-                self.cmdline.accept_hint();
+                self.cmdline.move_cursor_right();
             }
+
+            // Shift+arrows: extend the cmdline selection.
+            Action::CmdlineSelectLeft  => { self.cmdline.select_left(); }
+            Action::CmdlineSelectRight => { self.cmdline.select_right(); }
 
             Action::None => {}
             other => { info!(action = ?other, "unhandled action"); }
@@ -1129,14 +1418,15 @@ impl App {
 
     fn handle_popup_action(&mut self, action: Action) {
         let top = self.popup_stack.last();
-        let is_input    = matches!(top, Some(Popup::Input    { .. }));
-        let is_progress = matches!(top, Some(Popup::Progress { .. }));
-        let is_viewer   = matches!(top, Some(Popup::Viewer   { .. }));
-        let is_menu     = matches!(top, Some(Popup::Menu     { .. }));
+        let is_input     = matches!(top, Some(Popup::Input           { .. }));
+        let is_progress  = matches!(top, Some(Popup::Progress        { .. }));
+        let is_viewer    = matches!(top, Some(Popup::Viewer          { .. }));
+        let is_menu      = matches!(top, Some(Popup::Menu            { .. }));
+        let is_bookmarks = matches!(top, Some(Popup::BookmarkManager { .. }));
 
         if is_progress {
-            // Only Esc is meaningful during a running operation
             if matches!(action, Action::PopupClose | Action::Quit) {
+                debug!("progress popup: cancelled by user");
                 if let Some(token) = self.cancel_token.take() {
                     token.cancel();
                 }
@@ -1148,6 +1438,8 @@ impl App {
             self.handle_viewer_action(action);
         } else if is_menu {
             self.handle_menu_action(action);
+        } else if is_bookmarks {
+            self.handle_bookmark_manager_action(action);
         } else {
             self.handle_passive_popup_action(action);
         }
@@ -1171,11 +1463,17 @@ impl App {
                 if let Some(Popup::Input { value, on_confirm, .. }) = self.popup_stack.pop() {
                     let trimmed = value.trim().to_string();
                     if !trimmed.is_empty() {
+                        debug!(value = %trimmed, action = ?on_confirm, "input popup: confirmed");
                         self.execute_input_action(on_confirm, trimmed);
+                    } else {
+                        debug!("input popup: confirmed with empty value — ignored");
                     }
                 }
             }
-            Action::PopupClose | Action::Quit => { self.popup_stack.pop(); }
+            Action::PopupClose | Action::Quit => {
+                debug!("input popup: cancelled");
+                self.popup_stack.pop();
+            }
             _ => {}
         }
     }
@@ -1255,13 +1553,74 @@ impl App {
         }
     }
 
+    // ── Bookmark-manager popup ────────────────────────────────────────────
+
+    fn handle_bookmark_manager_action(&mut self, action: Action) {
+        match action {
+            Action::MoveUp => {
+                if let Some(Popup::BookmarkManager { selected, .. }) = self.popup_stack.last_mut() {
+                    *selected = selected.saturating_sub(1);
+                }
+            }
+            Action::MoveDown => {
+                if let Some(Popup::BookmarkManager { entries, selected }) = self.popup_stack.last_mut() {
+                    let max = entries.len().saturating_sub(1);
+                    if *selected < max { *selected += 1; }
+                }
+            }
+            Action::NavigateInto | Action::PopupConfirm => {
+                if let Some(Popup::BookmarkManager { entries, selected }) = self.popup_stack.last() {
+                    let path = entries.get(*selected).map(|(_, p)| p.clone());
+                    self.popup_stack.pop();
+                    if let Some(p) = path {
+                        self.navigate_active_to(p);
+                    }
+                }
+            }
+            Action::CmdlineDeleteForward => {
+                // Extract which bookmark slot to clear
+                let slot: Option<usize> = match self.popup_stack.last() {
+                    Some(Popup::BookmarkManager { entries, selected }) => {
+                        entries.get(*selected).map(|(n, _)| *n as usize)
+                    }
+                    _ => None,
+                };
+                if let Some(idx) = slot {
+                    self.bookmarks[idx] = None;
+                    self.save_bookmarks();
+                    // Rebuild entries in the popup
+                    let new_entries: Vec<(u8, PathBuf)> = self.bookmarks.iter()
+                        .enumerate()
+                        .filter_map(|(i, opt)| opt.as_ref().map(|p| (i as u8, p.clone())))
+                        .collect();
+                    if let Some(Popup::BookmarkManager { entries, selected }) = self.popup_stack.last_mut() {
+                        *selected = (*selected).min(new_entries.len().saturating_sub(1));
+                        *entries  = new_entries;
+                    }
+                }
+            }
+            Action::PopupClose | Action::Quit => {
+                self.popup_stack.pop();
+            }
+            _ => {}
+        }
+    }
+
     /// Actions for `Popup::Error` and `Popup::Confirm`.
     fn handle_passive_popup_action(&mut self, action: Action) {
         match action {
-            Action::PopupClose | Action::Quit => { self.popup_stack.pop(); }
+            Action::PopupClose | Action::Quit => {
+                if let Some(Popup::Error(msg)) = self.popup_stack.last() {
+                    debug!(message = %msg, "error popup: dismissed");
+                } else {
+                    debug!("confirm popup: cancelled");
+                }
+                self.popup_stack.pop();
+            }
             Action::PopupConfirm | Action::NavigateInto => {
                 if let Some(popup) = self.popup_stack.pop() {
                     if let Popup::Confirm { action_on_confirm, .. } = popup {
+                        info!(action = ?action_on_confirm, "confirm popup: accepted");
                         self.execute_confirm_action(action_on_confirm);
                     }
                 }
@@ -1440,6 +1799,7 @@ impl App {
                     }
                 };
 
+                info!(count = entries.len(), "delete: starting");
                 let mut first_error: Option<String> = None;
                 for (name, path) in &entries {
                     if let VfsPath::Local(ref p) = path {
@@ -1449,8 +1809,9 @@ impl App {
                             std::fs::remove_file(p)
                         };
                         match result {
-                            Ok(()) => info!(path = %p.display(), "deleted"),
+                            Ok(()) => info!(path = %p.display(), "delete: entry removed"),
                             Err(e) => {
+                                warn!(path = %p.display(), error = %e, "delete: failed");
                                 first_error = Some(format!("Cannot delete «{name}»: {e}"));
                                 break;
                             }
@@ -1698,6 +2059,14 @@ impl App {
                 .sum()
         });
 
+        info!(
+            is_move,
+            count       = srcs.len(),
+            total_bytes = total,
+            dst         = %dst_dir.display(),
+            "file-op: launched"
+        );
+
         let src_name = if srcs.len() == 1 {
             srcs[0].file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -1784,6 +2153,7 @@ impl App {
         }
 
         if data.done {
+            info!(source = %data.source_name, "file-op: completed");
             self.popup_stack.pop();
             self.cancel_token = None;
 
@@ -1809,6 +2179,11 @@ impl App {
             }
             if entry.is_dir {
                 // Normal directory (or archive sub-dir) navigation
+                debug!(
+                    panel  = ?self.active_panel,
+                    target = %entry.path.display_string(),
+                    "navigate: into directory"
+                );
                 let provider = Arc::clone(&self.provider);
                 let panel = match self.active_panel {
                     PanelSide::Left  => &mut self.left_panel,
@@ -1820,6 +2195,11 @@ impl App {
                 // Enter any supported archive as a virtual directory
                 if let VfsPath::Local(ref p) = entry.path {
                     let archive_path = p.clone();
+                    debug!(
+                        panel   = ?self.active_panel,
+                        archive = %archive_path.display(),
+                        "navigate: opening archive"
+                    );
                     let provider = Arc::clone(&self.provider);
                     let panel = match self.active_panel {
                         PanelSide::Left  => &mut self.left_panel,
@@ -1831,8 +2211,9 @@ impl App {
                     };
                     panel.load(provider.as_ref());
                 }
+            } else {
+                trace!(file = %entry.name, "navigate: Enter on regular file (no-op)");
             }
-            // For other regular files Enter is a no-op (use F3/F4)
         }
     }
 
@@ -1844,6 +2225,12 @@ impl App {
         // Remember which child we're leaving so we can place the cursor on it.
         let child_name = current.last_component();
         if let Some(parent) = self.provider.parent(&current) {
+            debug!(
+                panel = ?self.active_panel,
+                from  = %current.display_string(),
+                to    = %parent.display_string(),
+                "navigate: up"
+            );
             let provider = Arc::clone(&self.provider);
             let panel = match self.active_panel {
                 PanelSide::Left  => &mut self.left_panel,
@@ -1856,6 +2243,8 @@ impl App {
                     panel.selected_index = idx;
                 }
             }
+        } else {
+            trace!(panel = ?self.active_panel, "navigate: already at root");
         }
     }
 
@@ -1879,21 +2268,103 @@ impl App {
         self.active_panel().selected_entry().map(|e| e.name.clone())
     }
 
+    /// Recompute whether the history suggestion popup should be visible.
+    /// Call after every cmdline text modification.
+    pub fn update_history_popup(&mut self) {
+        // Never show while a modal popup is blocking input
+        if !self.popup_stack.is_empty() {
+            self.history_popup = None;
+            return;
+        }
+        let input = self.cmdline.input.clone();
+        if input.is_empty() {
+            if self.history_popup.is_some() {
+                trace!("history popup: hidden (input cleared)");
+            }
+            self.history_popup = None;
+            self.history_popup_closed_for.clear();
+            return;
+        }
+        // Respect the user's explicit Esc dismissal for this exact input
+        if self.history_popup.is_none() && input == self.history_popup_closed_for {
+            return;
+        }
+        let matches = self.cmdline.history_matches(&input);
+        if matches.is_empty() {
+            if self.history_popup.is_some() {
+                trace!("history popup: hidden (no matches)");
+            }
+            self.history_popup = None;
+        } else {
+            let n = matches.len();
+            if self.history_popup.is_none() {
+                trace!(matches = n, input = %input, "history popup: shown");
+                self.history_popup = Some(HistoryPopupState { selected_idx: 0 });
+            }
+            if let Some(ref mut p) = self.history_popup {
+                p.selected_idx = p.selected_idx.min(n.saturating_sub(1));
+            }
+        }
+    }
+
     pub fn push_error(&mut self, message: impl Into<String>) {
-        self.popup_stack.push(Popup::Error(message.into()));
+        let msg: String = message.into();
+        warn!(message = %msg, popup_depth = self.popup_stack.len(), "error popup");
+        self.popup_stack.push(Popup::Error(msg));
     }
 
     pub fn reload_active_panel(&mut self) {
+        debug!(panel = ?self.active_panel, "panel: reload after shell command");
         let provider = Arc::clone(&self.provider);
         self.active_panel_mut().load(provider.as_ref());
     }
 
     /// Navigate the active panel to `path` and reload its contents.
     pub fn navigate_active_to(&mut self, path: PathBuf) {
+        debug!(panel = ?self.active_panel, path = %path.display(), "navigate: active panel to");
         let provider = Arc::clone(&self.provider);
         let panel = self.active_panel_mut();
         panel.current_path = VfsPath::Local(path);
         panel.load(provider.as_ref());
+    }
+
+    // ── Bookmark persistence ──────────────────────────────────────────────
+
+    fn bookmarks_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join(APP_DIR).join("bookmarks"))
+    }
+
+    /// Persist the bookmark array to disk (one path per line; empty line = unset).
+    pub fn save_bookmarks(&self) {
+        let Some(path) = Self::bookmarks_path() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let content: String = self.bookmarks.iter()
+            .map(|b| match b {
+                Some(p) => p.display().to_string(),
+                None    => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n") + "\n";
+        let _ = std::fs::write(path, content);
+    }
+
+    /// Load bookmarks from disk; silently ignores missing/malformed files.
+    fn load_bookmarks(&mut self) {
+        let Some(path) = Self::bookmarks_path() else { return };
+        let Ok(content) = std::fs::read_to_string(path) else { return };
+        let mut count = 0usize;
+        for (i, line) in content.lines().enumerate().take(10) {
+            if !line.is_empty() {
+                let p = PathBuf::from(line);
+                if p.is_dir() {
+                    self.bookmarks[i] = Some(p);
+                    count += 1;
+                }
+            }
+        }
+        debug!(loaded = count, "bookmarks: restored from disk");
     }
 
     // ── Panel state persistence ───────────────────────────────────────────
@@ -1918,14 +2389,25 @@ impl App {
             self.theme.kind.id(),
             self.panels_height_percent,
         );
+        debug!(
+            left  = %left_dir.display(),
+            right = %right_dir.display(),
+            "panel state: saved"
+        );
         let _ = std::fs::write(path, content);
     }
 
     /// Restore both panels' paths, cursor indices, and theme from disk.
     /// Silently ignores missing or malformed files and non-existent directories.
     fn load_panel_state(&mut self) {
-        let Some(path) = Self::panel_state_path() else { return };
-        let Ok(content) = std::fs::read_to_string(path) else { return };
+        let Some(path) = Self::panel_state_path() else {
+            debug!("panel state: no cache dir, skipping restore");
+            return;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            debug!(file = %path.display(), "panel state: file not found, using defaults");
+            return;
+        };
         let lines: Vec<&str> = content.lines().collect();
         if lines.len() < 4 { return; }
 
@@ -1962,6 +2444,13 @@ impl App {
                 self.panels_height_percent = pct.clamp(10, 100);
             }
         }
+
+        debug!(
+            left  = %self.left_panel.current_path.display_string(),
+            right = %self.right_panel.current_path.display_string(),
+            theme = %self.theme.kind.id(),
+            "panel state: restored"
+        );
     }
 
     /// Handle a mouse event.  Called by the event loop in `main.rs`.
@@ -2014,6 +2503,14 @@ impl App {
     /// Append a command header and its captured output to the output buffer.
     /// Scrolls to the bottom so the latest output is visible.
     pub fn append_output(&mut self, command: &str, cwd: &Path, output: &str) {
+        info!(
+            command,
+            cwd        = %cwd.display(),
+            lines      = output.lines().count(),
+            bytes      = output.len(),
+            buf_before = self.output_buffer.len(),
+            "output buffer: appended"
+        );
         if !self.output_buffer.is_empty() {
             self.output_buffer.push(String::new());
         }

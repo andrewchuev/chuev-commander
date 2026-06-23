@@ -22,7 +22,7 @@ mod theme;
 mod ui;
 mod vfs;
 
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use std::{io, path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant}};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -34,12 +34,11 @@ use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
-use tracing_appender::rolling;
+use tracing::{debug, error, info, trace};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use actions::key_event_to_action;
-use app::App;
+use app::{App, PendingAction};
 use events::{AppEvent, EventSender};
 use vfs::router::RoutingProvider;
 
@@ -53,7 +52,7 @@ async fn main() -> Result<()> {
     // The returned guard must live for the entire process lifetime so the
     // background writer thread is not dropped prematurely.
     let _log_guard = setup_logging().context("initialising logging")?;
-    info!("chuev-commander starting");
+    info!(version = env!("CARGO_PKG_VERSION"), "chuev-commander starting");
 
     // ── Terminal initialisation ───────────────────────────────────────────────
     enable_raw_mode().context("enabling raw mode")?;
@@ -82,7 +81,7 @@ async fn main() -> Result<()> {
         eprintln!("Error: {e:#}");
     }
 
-    info!("chuev-commander exiting");
+    info!(version = env!("CARGO_PKG_VERSION"), "chuev-commander exiting");
     result
 }
 
@@ -121,83 +120,125 @@ async fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
 
             Some(AppEvent::Key(key)) => {
                 let action = key_event_to_action(&key);
+                // Cursor movement and typing are very high frequency — trace level only.
+                // All other actions log at debug so they appear in normal debug sessions.
+                match &action {
+                    actions::Action::MoveUp
+                    | actions::Action::MoveDown
+                    | actions::Action::MoveLeft
+                    | actions::Action::MoveRight
+                    | actions::Action::PageUp
+                    | actions::Action::PageDown
+                    | actions::Action::Home
+                    | actions::Action::End
+                    | actions::Action::CmdlineChar(_)
+                    | actions::Action::None => {
+                        trace!(key = ?key.code, mods = ?key.modifiers, action = ?action, "key");
+                    }
+                    _ => {
+                        debug!(key = ?key.code, mods = ?key.modifiers, action = ?action, "key");
+                    }
+                }
                 app.update(action);
 
-                // Clipboard copy: write text to the system clipboard
-                if let Some(text) = app.pending_clipboard_copy.take() {
-                    if let Some(cb) = clipboard.as_mut() {
-                        if let Err(e) = cb.set_text(text) {
-                            tracing::warn!(error = %e, "clipboard write failed");
-                        }
-                    }
-                }
-
-                // Clipboard paste: read text and append to the command line
-                if app.pending_clipboard_paste {
-                    app.pending_clipboard_paste = false;
-                    if let Some(cb) = clipboard.as_mut() {
-                        match cb.get_text() {
-                            Ok(text) => {
-                                for c in text.chars() {
-                                    if !c.is_control() {
-                                        app.cmdline.push_char(c);
-                                    }
+                // Dispatch any I/O operation the update produced.
+                if let Some(action) = app.pending_action.take() {
+                    match action {
+                        // ── Clipboard (instant; no TUI suspension needed) ──────
+                        PendingAction::ClipboardCopy(text) => {
+                            debug!(bytes = text.len(), "clipboard: writing");
+                            if let Some(cb) = clipboard.as_mut() {
+                                if let Err(e) = cb.set_text(text) {
+                                    tracing::warn!(error = %e, "clipboard: write failed");
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "clipboard read failed");
+                        }
+                        PendingAction::ClipboardPaste => {
+                            debug!("clipboard: reading");
+                            if let Some(cb) = clipboard.as_mut() {
+                                match cb.get_text() {
+                                    Ok(text) => {
+                                        debug!(bytes = text.len(), "clipboard: pasted into cmdline");
+                                        for c in text.chars().filter(|c| !c.is_control()) {
+                                            app.cmdline.push_char(c);
+                                        }
+                                    }
+                                    Err(e) => tracing::warn!(error = %e, "clipboard: read failed"),
+                                }
                             }
                         }
-                    }
-                }
 
-                // F4 Edit: stop the keyboard producer so the editor gets
-                // exclusive stdin access, then restore everything after.
-                if let Some(path) = app.pending_edit.take() {
-                    kb_cancel.cancel();
-                    let _ = kb_handle.await;
-                    // Drain events captured before the producer stopped
-                    while rx.try_recv().is_ok() {}
+                        // ── TUI-suspending actions (need exclusive stdin) ──────
+                        PendingAction::Edit(path) => {
+                            info!(path = %path.display(), "editor: launching");
+                            suspend_keyboard(&mut kb_cancel, &mut kb_handle, &mut rx).await;
 
-                    if let Err(e) = editor::launch(term, &path).await {
-                        error!(error = %e, "editor launch failed");
-                        app.push_error(format!("Editor error: {e:#}"));
-                    }
-
-                    // Drain any events that leaked while the editor was open
-                    while rx.try_recv().is_ok() {}
-
-                    // Restart keyboard producer with a fresh token
-                    kb_cancel = CancellationToken::new();
-                    kb_handle = tokio::spawn(keyboard_producer(tx.clone(), kb_cancel.clone()));
-                }
-
-                if let Some((cmd, cwd)) = app.pending_shell.take() {
-                    if let Some(arg) = parse_cd_arg(&cmd) {
-                        // `cd` is a shell built-in; run it as a panel navigation
-                        let new_path = resolve_cd_path(arg, &cwd);
-                        match std::fs::canonicalize(&new_path) {
-                            Ok(canonical) if canonical.is_dir() => {
-                                app.navigate_active_to(canonical);
+                            let t0 = Instant::now();
+                            if let Err(e) = editor::launch(term, &path).await {
+                                error!(error = %e, "editor: launch failed");
+                                app.push_error(format!("Editor error: {e:#}"));
+                            } else {
+                                info!(
+                                    path = %path.display(),
+                                    elapsed_ms = t0.elapsed().as_millis(),
+                                    "editor: returned"
+                                );
                             }
-                            _ => {
-                                let msg = if arg.is_empty() {
-                                    "cd: home directory not found".into()
-                                } else {
-                                    format!("cd: {arg}: No such file or directory")
-                                };
-                                app.push_error(msg);
+
+                            resume_keyboard(&tx, &mut kb_cancel, &mut kb_handle, &mut rx).await;
+                        }
+
+                        PendingAction::Shell { cmd, cwd } => {
+                            if let Some(arg) = parse_cd_arg(&cmd) {
+                                // `cd` is a shell built-in; handle as panel navigation.
+                                debug!(arg, "cd: resolving built-in");
+                                let new_path = resolve_cd_path(arg, &cwd);
+                                match std::fs::canonicalize(&new_path) {
+                                    Ok(canonical) if canonical.is_dir() => {
+                                        info!(path = %canonical.display(), "cd: navigated");
+                                        app.navigate_active_to(canonical);
+                                    }
+                                    _ => {
+                                        let msg = if arg.is_empty() {
+                                            "cd: home directory not found".into()
+                                        } else {
+                                            format!("cd: {arg}: No such file or directory")
+                                        };
+                                        tracing::warn!(msg, "cd: failed");
+                                        app.push_error(msg);
+                                    }
+                                }
+                            } else {
+                                info!(cmd = %cmd, cwd = %cwd.display(), "shell: executing");
+                                suspend_keyboard(&mut kb_cancel, &mut kb_handle, &mut rx).await;
+
+                                let t0 = Instant::now();
+                                match shell::run_interactive(term, &cmd, &cwd).await {
+                                    Ok(output) => {
+                                        info!(
+                                            cmd = %cmd,
+                                            elapsed_ms = t0.elapsed().as_millis(),
+                                            output_lines = output.lines().count(),
+                                            output_bytes = output.len(),
+                                            "shell: completed"
+                                        );
+                                        app.append_output(&cmd, &cwd, &output);
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            cmd = %cmd,
+                                            elapsed_ms = t0.elapsed().as_millis(),
+                                            error = %e,
+                                            "shell: failed"
+                                        );
+                                        app.push_error(format!("Shell error: {e:#}"));
+                                    }
+                                }
+
+                                resume_keyboard(&tx, &mut kb_cancel, &mut kb_handle, &mut rx).await;
+                                app.reload_active_panel();
                             }
                         }
-                    } else {
-                        match shell::capture(&cmd, &cwd).await {
-                            Ok(output) => app.append_output(&cmd, &cwd, &output),
-                            Err(e) => {
-                                error!(error = %e, "shell command failed");
-                                app.push_error(format!("Shell error: {e:#}"));
-                            }
-                        }
-                        app.reload_active_panel();
                     }
                 }
             }
@@ -225,6 +266,42 @@ async fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
 
     app.save_panel_state();
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyboard producer lifecycle helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cancel the keyboard producer and drain any buffered events so the next
+/// operation gets exclusive access to stdin.
+async fn suspend_keyboard(
+    kb_cancel: &mut CancellationToken,
+    kb_handle: &mut tokio::task::JoinHandle<()>,
+    rx:        &mut mpsc::Receiver<AppEvent>,
+) {
+    debug!("keyboard: suspending producer");
+    kb_cancel.cancel();
+    // Swap in a dummy handle so we can await the old one.
+    let old = std::mem::replace(kb_handle, tokio::spawn(async {}));
+    let _ = old.await;
+    let mut drained = 0usize;
+    while rx.try_recv().is_ok() { drained += 1; }
+    debug!(drained_events = drained, "keyboard: producer suspended");
+}
+
+/// Restart the keyboard producer with a fresh cancellation token and drain
+/// any stray events accumulated during the suspended period.
+async fn resume_keyboard(
+    tx:        &EventSender,
+    kb_cancel: &mut CancellationToken,
+    kb_handle: &mut tokio::task::JoinHandle<()>,
+    rx:        &mut mpsc::Receiver<AppEvent>,
+) {
+    let mut drained = 0usize;
+    while rx.try_recv().is_ok() { drained += 1; }
+    *kb_cancel = CancellationToken::new();
+    *kb_handle = tokio::spawn(keyboard_producer(tx.clone(), kb_cancel.clone()));
+    debug!(drained_events = drained, "keyboard: producer resumed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -402,25 +479,35 @@ mod cd_tests {
     }
 }
 
-/// Initialise `tracing` with a non-blocking file appender.
+/// Initialise `tracing` with a per-session non-blocking file appender.
 ///
-/// Log target priority:
-///   1. `$XDG_CACHE_HOME/my_far/debug.log`  (Linux)
-///   2. `$HOME/Library/Caches/my_far/debug.log` (macOS)
-///   3. `./debug.log` (fallback when the cache dir is not found)
+/// Each launch creates a new file:
+///   `$XDG_CACHE_HOME/chuev-commander/session_YYYY-MM-DDTHH-MM-SS.log`
+///
+/// Up to `SESSION_LOG_KEEP` files are retained; older ones are deleted on
+/// startup so the directory does not grow without bound.
 ///
 /// Returns the `WorkerGuard` — **must be kept alive in `main`** or the
 /// background writer thread exits and the final log lines are lost.
 fn setup_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
+    const SESSION_LOG_KEEP: usize = 20;
+
     let log_dir = dirs::cache_dir()
         .map(|d| d.join("chuev-commander"))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+        .unwrap_or_else(|| PathBuf::from("."));
 
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("creating log dir {}", log_dir.display()))?;
 
-    let file_appender         = rolling::never(&log_dir, "debug.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    // Purge excess old session logs before creating the new one.
+    trim_session_logs(&log_dir, SESSION_LOG_KEEP);
+
+    let ts       = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S");
+    let log_path = log_dir.join(format!("session_{ts}.log"));
+    let log_file = std::fs::File::create(&log_path)
+        .with_context(|| format!("creating session log {}", log_path.display()))?;
+
+    let (non_blocking, guard) = tracing_appender::non_blocking(log_file);
 
     tracing_subscriber::registry()
         .with(
@@ -436,5 +523,30 @@ fn setup_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         )
         .init();
 
+    // The first log line is written after init() so it appears in the file.
+    tracing::info!(log = %log_path.display(), "session log opened");
     Ok(guard)
+}
+
+/// Delete the oldest session log files, keeping the `keep` most recent.
+/// Files are identified by the `session_*.log` naming pattern; ISO-8601
+/// timestamps in the names sort lexicographically in chronological order.
+fn trim_session_logs(log_dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(log_dir) else { return };
+    let mut logs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("session_") && n.ends_with(".log"))
+                .unwrap_or(false)
+        })
+        .collect();
+    logs.sort_unstable();          // lexicographic = chronological for ISO names
+    if logs.len() > keep {
+        for old in &logs[..logs.len() - keep] {
+            let _ = std::fs::remove_file(old);
+        }
+    }
 }
