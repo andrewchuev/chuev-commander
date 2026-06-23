@@ -2322,6 +2322,14 @@ impl App {
         }
     }
 
+    /// Clear the output buffer and reset the scroll position.
+    /// Invoked when the user types `clear` or `cls` in the command line.
+    pub fn clear_output_buffer(&mut self) {
+        info!(lines = self.output_buffer.len(), "output buffer: cleared");
+        self.output_buffer.clear();
+        self.output_scroll = 0;
+    }
+
     pub fn push_error(&mut self, message: impl Into<String>) {
         let msg: String = message.into();
         warn!(message = %msg, popup_depth = self.popup_stack.len(), "error popup");

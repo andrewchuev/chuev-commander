@@ -208,6 +208,10 @@ async fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                                         app.push_error(msg);
                                     }
                                 }
+                            } else if is_clear_cmd(&cmd) {
+                                // `clear` / `cls` clears the output buffer; no PTY needed.
+                                info!(cmd = %cmd, "clear: built-in, clearing output buffer");
+                                app.clear_output_buffer();
                             } else {
                                 info!(cmd = %cmd, cwd = %cwd.display(), "shell: executing");
                                 suspend_keyboard(&mut kb_cancel, &mut kb_handle, &mut rx).await;
@@ -307,6 +311,13 @@ async fn resume_keyboard(
 // ─────────────────────────────────────────────────────────────────────────────
 // cd helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns `true` when `cmd` is a screen-clear command (`clear` or `cls`).
+/// These are intercepted as a file-manager built-in that clears the output
+/// buffer — running them in a PTY would produce no visible effect.
+fn is_clear_cmd(cmd: &str) -> bool {
+    matches!(cmd.trim(), "clear" | "cls")
+}
 
 /// If `cmd` is a `cd [arg]` command, returns the path argument (may be empty
 /// for bare `cd`). Returns `None` for any other command.
