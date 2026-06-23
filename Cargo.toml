@@ -1,0 +1,46 @@
+[package]
+name = "chuev-commander"
+version = "0.1.0"
+edition = "2021"
+authors  = ["Andrew Chuev <andrew.chuev@gmail.com>"]
+description = "Far Manager–style TUI file commander"
+
+[[bin]]
+name = "chuev-commander"
+path = "src/main.rs"
+
+[dependencies]
+# ── TUI ───────────────────────────────────────────────────────────────────────
+ratatui    = "0.29"
+crossterm  = { version = "0.28", features = ["event-stream"] }
+
+# ── Async runtime ─────────────────────────────────────────────────────────────
+tokio      = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+# futures::StreamExt is needed to drive crossterm's EventStream
+futures    = "0.3"
+
+# ── Logging (all output → file, never stdout/stderr) ──────────────────────────
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender   = "0.2"
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+anyhow  = "1"         # ergonomic error propagation
+dirs    = "5"         # XDG / platform cache directory lookup
+chrono     = { version = "0.4", default-features = false, features = ["clock", "std"] }
+libc       = "0.2"       # statvfs for free-space reporting
+tokio-util = "0.7" # CancellationToken (feature included by default in 0.7)
+zip        = { version = "2", default-features = false, features = ["deflate"] }
+tar        = "0.4"                 # tar archive reading
+flate2     = "1"                   # gzip decompression (tar.gz / tgz)
+bzip2      = "0.4"                 # bzip2 decompression (tar.bz2)
+arboard    = { version = "3", features = ["wayland-data-control"] } # system clipboard
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = "debuginfo"
