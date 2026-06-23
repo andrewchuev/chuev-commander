@@ -893,11 +893,11 @@ impl App {
         let cwd = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("/"));
 
-        let mut left_panel  = PanelState::new(VfsPath::Local(cwd.clone()));
-        let mut right_panel = PanelState::new(VfsPath::Local(cwd));
-
-        left_panel.load(provider.as_ref());
-        right_panel.load(provider.as_ref());
+        // Panels are NOT loaded here — load_panel_state() restores saved paths and
+        // calls load() itself.  We only fall back to cwd if no saved state exists,
+        // avoiding a redundant read_dir on every startup.
+        let left_panel  = PanelState::new(VfsPath::Local(cwd.clone()));
+        let right_panel = PanelState::new(VfsPath::Local(cwd));
 
         let mut app = Self {
             left_panel,
@@ -923,6 +923,16 @@ impl App {
             provider,
         };
         app.load_panel_state();
+        // Fallback: if load_panel_state found no saved file, panels are still
+        // unloaded (entries empty).  Populate them from the cwd now.
+        if app.left_panel.entries.is_empty() {
+            let p = Arc::clone(&app.provider);
+            app.left_panel.load(p.as_ref());
+        }
+        if app.right_panel.entries.is_empty() {
+            let p = Arc::clone(&app.provider);
+            app.right_panel.load(p.as_ref());
+        }
         app.load_bookmarks();
         Ok(app)
     }
@@ -1170,9 +1180,14 @@ impl App {
                     let idx     = self.history_popup.as_ref().map(|p| p.selected_idx).unwrap_or(0);
                     if let Some(entry) = matches.get(idx) {
                         let entry = entry.clone();
+                        info!(entry = %entry, "history: entry deleted");
                         self.cmdline.delete_entry(&entry);
+                    } else {
+                        debug!("history: Shift+Delete pressed but no entry at selected index");
                     }
                     self.update_history_popup();
+                } else {
+                    debug!("history: Shift+Delete pressed but history popup is not open");
                 }
             }
 
@@ -2511,6 +2526,7 @@ impl App {
             buf_before = self.output_buffer.len(),
             "output buffer: appended"
         );
+        // Blank separator between successive commands (visual breathing room).
         if !self.output_buffer.is_empty() {
             self.output_buffer.push(String::new());
         }
@@ -2518,9 +2534,10 @@ impl App {
         for line in output.lines() {
             self.output_buffer.push(line.to_owned());
         }
-        if output.is_empty() {
-            self.output_buffer.push(String::new());
-        }
+        // No trailing empty line: the next command's separator already provides it.
+        // (Previously an extra empty line was added when output was empty, causing
+        // double-spacing for no-output commands like `clear`.)
+
         // Scroll to bottom so the newest output is visible
         self.output_scroll = self.output_buffer.len().saturating_sub(1);
     }
