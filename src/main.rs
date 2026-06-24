@@ -108,15 +108,20 @@ async fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     // Producer: 100 ms heartbeat for animations and periodic UI updates
     tokio::spawn(tick_producer(tx.clone(), Duration::from_millis(100)));
 
-    loop {
-        // Draw first so the initial state is visible immediately
-        term.draw(|frame| ui::render(frame, &mut app))
-            .context("drawing frame")?;
+    // Draw the initial frame before entering the event loop.
+    term.draw(|frame| ui::render(frame, &mut app))
+        .context("drawing initial frame")?;
 
-        // Block until the next event arrives
+    loop {
+        // `needs_redraw` is set to `true` whenever an event mutates visible state.
+        // Tick-driven redraws are limited to frames that have an active background
+        // operation so the progress bar animates without constant cursor flicker.
+        let needs_redraw;
+
         match rx.recv().await {
             Some(AppEvent::Mouse(mouse)) => {
                 app.handle_mouse(mouse);
+                needs_redraw = true;
             }
 
             Some(AppEvent::Key(key)) => {
@@ -246,15 +251,19 @@ async fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
                         }
                     }
                 }
+                needs_redraw = true;
             }
 
             Some(AppEvent::Tick) => {
-                // Reserved for: cursor blink, progress-bar animation, etc.
-                // Currently a no-op; the draw call above already re-renders.
+                // Redraw on tick only when a background operation is active so the
+                // progress bar animates.  When idle, suppress tick-driven redraws to
+                // eliminate the cursor flicker caused by constant terminal writes.
+                needs_redraw = app.cancel_token.is_some();
             }
 
             Some(AppEvent::Progress(data)) => {
                 app.handle_progress(data);
+                needs_redraw = true;
             }
 
             // All senders were dropped — shouldn't happen in normal operation
@@ -266,6 +275,11 @@ async fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
 
         if app.should_quit {
             break;
+        }
+
+        if needs_redraw {
+            term.draw(|frame| ui::render(frame, &mut app))
+                .context("drawing frame")?;
         }
     }
 
