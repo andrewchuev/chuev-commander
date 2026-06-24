@@ -16,7 +16,7 @@
 //! | Tab              | TabComplete (panels hidden) / switch panel (panels visible) |
 //! | Alt+char         | QuickSearchChar — activate / extend quick-search in panel |
 //! | Ctrl+Shift+C     | CopyAbsPathToClipboard  |
-//! | Ctrl+Alt+Shift+C | CopyOutputToClipboard   |
+//! | Ctrl+Alt+C       | CopyOutputToClipboard   |
 //! | Ctrl+B           | OpenBookmarkManager     |
 //! | Ctrl+0..9        | BookmarkGoto(n)         |
 //! | Delete           | CmdlineDeleteForward    |
@@ -146,8 +146,11 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt   = key.modifiers.contains(KeyModifiers::ALT);
 
-    // ── Ctrl+Alt+Shift combos (must come before Ctrl+Shift and plain Ctrl) ──
-    if ctrl && alt && shift {
+    // ── Ctrl+Alt combos (must come before plain Ctrl so Ctrl+Alt+C is not
+    //    swallowed by the Ctrl+C → CopyToClipboard mapping below) ──────────
+    // Shift state is ignored here: Ctrl+Alt+Shift+C also triggers this action
+    // because the user may hit Shift accidentally while reaching for Ctrl+Alt.
+    if ctrl && alt {
         return match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => Action::CopyOutputToClipboard,
             _ => Action::None,

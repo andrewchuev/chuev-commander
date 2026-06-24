@@ -49,7 +49,7 @@ F2 Refresh  F3 View  F4 Edit  F5 Copy/Extract  F6 Move  F7 MkDir  F8 Del  F9 Men
   - `Ctrl+C` — copy selected/marked entry paths
   - `Ctrl+Shift+C` — copy the absolute path of the entry under the cursor
   - `Ctrl+V` — paste clipboard text into the command line
-  - `Ctrl+Alt+Shift+C` — copy the entire shell output buffer as plain text
+  - `Ctrl+Alt+C` — copy the entire shell output buffer as plain text
 - **Mouse support** — left-click focuses a panel and moves the cursor to the clicked entry; scroll wheel scrolls entries in the active panel (or the output buffer in Ctrl+O mode)
 - **Main menu** (F9) — horizontal menu bar with keyboard-navigable dropdowns: Left, Files, Commands, Options, Right
 - **Color schemes** — two built-in themes selectable from the Options menu: *Blue Classic* (default) and *Dos Navigator*; theme persists between launches
@@ -74,7 +74,7 @@ F2 Refresh  F3 View  F4 Edit  F5 Copy/Extract  F6 Move  F7 MkDir  F8 Del  F9 Men
 | `Ctrl+↑` / `Ctrl+↓` | Grow / shrink panels height |
 | `Ctrl+C` | Copy selected/marked entry paths to system clipboard |
 | `Ctrl+Shift+C` | Copy absolute path of the entry under the cursor to clipboard |
-| `Ctrl+Alt+Shift+C` | Copy the entire shell output buffer to clipboard |
+| `Ctrl+Alt+C` | Copy the entire shell output buffer to clipboard |
 | `Ctrl+V` | Paste clipboard text into command line |
 | `Ctrl+U` | Clear command line |
 | `Ctrl+Enter` | Insert current filename into command line |
