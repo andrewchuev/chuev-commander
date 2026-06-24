@@ -1,15 +1,15 @@
 //! Command-line widget — the single input line shown between the file panels
 //! and the F-key status bar.
 //!
-//! Layout: `<dim-path>> <white-input><dim-ghost-hint>`
+//! Layout: `<dim-path>> <white-input>`
 //!
-//! The real terminal cursor is placed at the end of the typed input via
-//! `frame.set_cursor_position`. A dim "ghost" span shows the history hint
-//! (most-recent matching entry) so the user can accept it with →.
+//! The real terminal cursor tracks `CmdLine::cursor_pos`.  When a selection is
+//! active the selected region is highlighted with a blue background.
+//! History suggestions are shown in the history popup overlay above this line.
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -53,43 +53,88 @@ pub fn render_cmdline(
 
     let input       = &cmdline.input;
     let input_chars = input.chars().count();
+    let cursor_char = input[..cmdline.cursor_pos].chars().count();
 
-    // Show only the tail of the input when it overflows so cursor stays visible
-    let display_input = if input_chars > input_avail {
-        let skip = input_chars - input_avail;
-        let byte = input.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
-        &input[byte..]
+    // Scroll the view so the cursor is always within [0, input_avail).
+    let scroll_chars: usize = if cursor_char < input_avail {
+        0
     } else {
-        input.as_str()
+        cursor_char + 1 - input_avail
     };
-    let display_input_chars = display_input.chars().count();
 
-    // Ghost hint — the suffix from the most-recent matching history entry
-    let hint_style = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
+    // Byte range of the visible portion of the input
+    let vis_start_byte = nth_char_byte(input, scroll_chars);
+    let vis_end_char   = (scroll_chars + input_avail).min(input_chars);
+    let vis_end_byte   = nth_char_byte(input, vis_end_char);
+    let display_input  = &input[vis_start_byte..vis_end_byte];
 
-    let hint_chars_avail = input_avail.saturating_sub(display_input_chars);
-    let hint_span = match cmdline.history_hint() {
-        Some(hint) if hint_chars_avail > 0 => {
-            let hint_display: String = hint.chars().take(hint_chars_avail).collect();
-            Span::styled(hint_display, hint_style)
+    let cursor_col = cursor_char - scroll_chars;
+
+    // ── Selection bounds (absolute char indices) ──────────────────────────
+    let sel_range: Option<(usize, usize)> = cmdline.selection_anchor.and_then(|anchor| {
+        let anchor_char = input[..anchor].chars().count();
+        let (s, e) = if anchor_char <= cursor_char {
+            (anchor_char, cursor_char)
+        } else {
+            (cursor_char, anchor_char)
+        };
+        if s == e { None } else { Some((s, e)) }
+    });
+
+    // ── Input spans (plain or with selection highlight) ───────────────────
+    let sel_style = Style::default().bg(Color::Blue).fg(Color::White);
+
+    let input_spans: Vec<Span<'static>> = match sel_range {
+        Some((sel_s, sel_e)) => {
+            // Clamp selection to the visible window
+            let vis_s = sel_s.max(scroll_chars);
+            let vis_e = sel_e.min(vis_end_char);
+            if vis_s < vis_e {
+                let local_s   = vis_s - scroll_chars;
+                let local_e   = vis_e - scroll_chars;
+                let pre_end_b = nth_char_byte(display_input, local_s);
+                let sel_end_b = nth_char_byte(display_input, local_e);
+
+                let pre  = &display_input[..pre_end_b];
+                let sel  = &display_input[pre_end_b..sel_end_b];
+                let post = &display_input[sel_end_b..];
+
+                let mut s: Vec<Span<'static>> = Vec::with_capacity(3);
+                if !pre.is_empty()  { s.push(Span::styled(pre.to_owned(),  theme.cmdline_text)); }
+                if !sel.is_empty()  { s.push(Span::styled(sel.to_owned(),  sel_style)); }
+                if !post.is_empty() { s.push(Span::styled(post.to_owned(), theme.cmdline_text)); }
+                if s.is_empty()     { s.push(Span::raw("")); }
+                s
+            } else {
+                vec![Span::styled(display_input.to_owned(), theme.cmdline_text)]
+            }
         }
-        _ => Span::raw(""),
+        None => vec![Span::styled(display_input.to_owned(), theme.cmdline_text)],
     };
 
-    let spans = vec![
-        Span::styled(prompt, theme.cmdline_path),
-        Span::styled(display_input.to_owned(), theme.cmdline_text),
-        hint_span,
-    ];
+    // History suggestions are shown in the popup overlay; no inline ghost hint.
+    let hint_span: Span<'static> = Span::raw("");
+
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(input_spans.len() + 2);
+    spans.push(Span::styled(prompt, theme.cmdline_path));
+    spans.extend(input_spans);
+    spans.push(hint_span);
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    // Place the real terminal cursor at the end of the typed input
+    // Place the real terminal cursor at the current cursor position
     if show_cursor {
-        let cursor_x = area.x + prompt_w as u16 + display_input_chars as u16;
+        let cursor_x = area.x + prompt_w as u16 + cursor_col as u16;
         let cursor_y = area.y;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+/// Returns the byte offset of the `n`-th character boundary in `s`.
+/// Returns `s.len()` when `n` >= the number of characters.
+fn nth_char_byte(s: &str, n: usize) -> usize {
+    s.char_indices()
+        .nth(n)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
 }

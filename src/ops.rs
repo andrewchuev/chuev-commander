@@ -91,7 +91,7 @@ pub async fn extract_archive(
         r = tokio::task::spawn_blocking(move || {
             let progress = |done: u64, total: u64| {
                 let _ = tx_prog.try_send(AppEvent::Progress(ProgressData {
-                    operation:   "Extracting".into(),
+                    operation:   "Extracting",
                     source_name: src_name_prog.clone(),
                     bytes_done:  done,
                     bytes_total: total,
@@ -106,7 +106,7 @@ pub async fn extract_archive(
 
     let _ = tx
         .send(AppEvent::Progress(ProgressData {
-            operation:   "Extracting".into(),
+            operation:   "Extracting",
             source_name: src_name,
             bytes_done:  count,
             bytes_total: count,
@@ -139,7 +139,7 @@ pub async fn extract_archive_entries(
         r = tokio::task::spawn_blocking(move || {
             let progress = |done: u64, total: u64| {
                 let _ = tx_prog.try_send(AppEvent::Progress(ProgressData {
-                    operation:   "Extracting".into(),
+                    operation:   "Extracting",
                     source_name: src_name_prog.clone(),
                     bytes_done:  done,
                     bytes_total: total,
@@ -156,7 +156,7 @@ pub async fn extract_archive_entries(
 
     let _ = tx
         .send(AppEvent::Progress(ProgressData {
-            operation:   "Extracting".into(),
+            operation:   "Extracting",
             source_name: src_name,
             bytes_done:  count,
             bytes_total: count,
@@ -191,7 +191,7 @@ pub async fn create_archive(
         r = tokio::task::spawn_blocking(move || {
             let progress = |done: u64, total: u64| {
                 let _ = tx_prog.try_send(AppEvent::Progress(ProgressData {
-                    operation:   "Creating".into(),
+                    operation:   "Creating",
                     source_name: src_name_prog.clone(),
                     bytes_done:  done,
                     bytes_total: total,
@@ -206,7 +206,7 @@ pub async fn create_archive(
 
     let _ = tx
         .send(AppEvent::Progress(ProgressData {
-            operation:   "Creating".into(),
+            operation:   "Creating",
             source_name: src_name,
             bytes_done:  count,
             bytes_total: count,
@@ -257,7 +257,7 @@ async fn move_entry_inner(
         let name = file_name(&src);
         let size = tokio::fs::metadata(&dst).await.map(|m| m.len()).unwrap_or(0);
         let _ = tx.send(AppEvent::Progress(ProgressData {
-            operation:   "Moving".into(),
+            operation:   "Moving",
             source_name: name,
             bytes_done:  size,
             bytes_total: size,
@@ -286,7 +286,7 @@ async fn copy_file(
     dst:       PathBuf,
     tx:        EventSender,
     cancel:    CancellationToken,
-    operation: &str,
+    operation: &'static str,
     emit_done: bool,
 ) -> Result<()> {
     let source_name = file_name(&src);
@@ -301,7 +301,6 @@ async fn copy_file(
 
     let mut buf  = vec![0u8; CHUNK];
     let mut done = 0u64;
-    let op       = operation.to_owned();
 
     loop {
         tokio::select! {
@@ -323,7 +322,7 @@ async fn copy_file(
                 done += n as u64;
 
                 if tx.try_send(AppEvent::Progress(ProgressData {
-                    operation:   op.clone(),
+                    operation,
                     source_name: source_name.clone(),
                     bytes_done:  done,
                     bytes_total: total,
@@ -338,7 +337,7 @@ async fn copy_file(
     dst_f.flush().await.context("flushing destination")?;
 
     let _ = tx.send(AppEvent::Progress(ProgressData {
-        operation:   op,
+        operation,
         source_name,
         bytes_done:  done,
         bytes_total: total,
@@ -386,7 +385,7 @@ async fn copy_dir_recursive(
         let is_last_file = idx + 1 == entry_count;
 
         let _ = tx.try_send(AppEvent::Progress(ProgressData {
-            operation:   "Copying".into(),
+            operation:   "Copying",
             source_name: file_name(&src_file),
             bytes_done:  done_bytes,
             bytes_total: total_bytes,
@@ -396,7 +395,7 @@ async fn copy_dir_recursive(
         // Only send the closing event on the very last file and only if requested
         if is_last_file {
             let _ = tx.send(AppEvent::Progress(ProgressData {
-                operation:   "Copying".into(),
+                operation:   "Copying",
                 source_name: file_name(&src),
                 bytes_done:  done_bytes,
                 bytes_total: total_bytes,
@@ -411,7 +410,7 @@ async fn copy_dir_recursive(
             .with_context(|| format!("creating {}", dst.display()))?;
         if emit_done {
             let _ = tx.send(AppEvent::Progress(ProgressData {
-                operation:   "Copying".into(),
+                operation:   "Copying",
                 source_name: file_name(&src),
                 bytes_done:  0,
                 bytes_total: 0,

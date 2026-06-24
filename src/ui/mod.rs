@@ -10,8 +10,7 @@ pub mod status;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
-    text::Span,
-    widgets::Paragraph,
+    widgets::{Block, Borders},
     Frame,
 };
 
@@ -19,7 +18,7 @@ use crate::app::{App, PanelSide};
 use cmdline::render_cmdline;
 use output::render_output;
 use panels::render_panel;
-use popups::render_top_popup;
+use popups::{render_history_popup, render_top_popup};
 use status::render_status_bar;
 
 /// Draw the entire UI for a single frame.
@@ -75,15 +74,22 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         }
     }
 
+    // ── History suggestion popup (above cmdline, below panels) ───────────
+    if let Some(ref hp) = app.history_popup {
+        let matches = app.cmdline.history_matches(&app.cmdline.input.clone());
+        render_history_popup(frame, &matches, hp.selected_idx, cmdline_area, area, theme);
+    }
+
     // ── Command line ──────────────────────────────────────────────────────
-    let panel_path   = app.active_panel().current_path.clone();
-    let show_cursor  = app.popup_stack.is_empty();
+    let panel_path  = app.active_panel().current_path.clone();
+    let show_cursor = app.popup_stack.is_empty();
     render_cmdline(frame, &app.cmdline, &panel_path, cmdline_area, theme, show_cursor);
 
     // ── Separator between cmdline and F-keys ──────────────────────────────
-    let sep_line = "─".repeat(sep_area.width as usize);
     frame.render_widget(
-        Paragraph::new(Span::styled(sep_line, Style::default().fg(ratatui::style::Color::DarkGray))),
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(ratatui::style::Color::DarkGray)),
         sep_area,
     );
 
@@ -92,8 +98,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // ── Popup stack — topmost entry paints over everything else ───────────
     if let Some(popup) = app.popup_stack.last() {
-        let popup = popup.clone();
-        render_top_popup(frame, &popup, area, theme);
+        render_top_popup(frame, popup, area, theme);
     }
 }
 

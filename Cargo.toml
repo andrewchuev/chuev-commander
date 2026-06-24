@@ -34,7 +34,8 @@ zip        = { version = "2", default-features = false, features = ["deflate"] }
 tar        = "0.4"                 # tar archive reading
 flate2     = "1"                   # gzip decompression (tar.gz / tgz)
 bzip2      = "0.4"                 # bzip2 decompression (tar.bz2)
-arboard    = { version = "3", features = ["wayland-data-control"] } # system clipboard
+arboard     = { version = "3", features = ["wayland-data-control"] } # system clipboard
+portable-pty = "0.8"   # cross-platform PTY for interactive command execution
 
 [dev-dependencies]
 tempfile = "3"

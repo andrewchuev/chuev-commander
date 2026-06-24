@@ -181,12 +181,12 @@ impl CmdLine {
     }
 
     /// Return all history entries that contain `query` as a substring (most-recent first).
-    /// When `query` is empty, returns the 20 most-recent entries.
+    /// When `query` is empty, returns the `HISTORY_MAX_MATCHES` most-recent entries.
     pub fn history_matches(&self, query: &str) -> Vec<String> {
         let q = query.to_lowercase();
         self.history.iter().rev()
             .filter(|h| q.is_empty() || h.to_lowercase().contains(&q))
-            .take(20)
+            .take(HISTORY_MAX_MATCHES)
             .cloned()
             .collect()
     }
@@ -336,6 +336,11 @@ mod cmdline_tests {
 }
 
 const APP_DIR: &str = "chuev-commander";
+
+/// Rows scrolled per Page-Up / Page-Down keypress.
+const PAGE_SIZE: usize = 20;
+/// Maximum history entries returned by `CmdLine::history_matches`.
+const HISTORY_MAX_MATCHES: usize = 20;
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -493,24 +498,38 @@ impl PanelState {
         let col   = self.sort_column;
         let order = self.sort_order;
 
-        self.entries.sort_by(|a, b| {
-            // Directories always sort before files regardless of column
-            if a.is_dir != b.is_dir {
-                return if a.is_dir {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Greater
-                };
+        // Name sorts use sort_by_cached_key to compute the lowercase key once per
+        // entry (O(N)) instead of once per comparison (O(N log N) allocations).
+        // Size/Modified avoid String allocation entirely so sort_by is sufficient.
+        match (col, order) {
+            (SortColumn::Name, SortOrder::Asc) => {
+                self.entries.sort_by_cached_key(|e| {
+                    (!e.is_dir, e.name.to_ascii_lowercase())
+                });
             }
-
-            let cmp = match col {
-                SortColumn::Name     => a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()),
-                SortColumn::Size     => a.size.cmp(&b.size),
-                SortColumn::Modified => a.modified.cmp(&b.modified),
-            };
-
-            if order == SortOrder::Desc { cmp.reverse() } else { cmp }
-        });
+            (SortColumn::Name, SortOrder::Desc) => {
+                self.entries.sort_by_cached_key(|e| {
+                    (!e.is_dir, std::cmp::Reverse(e.name.to_ascii_lowercase()))
+                });
+            }
+            _ => {
+                self.entries.sort_by(|a, b| {
+                    if a.is_dir != b.is_dir {
+                        return if a.is_dir {
+                            std::cmp::Ordering::Less
+                        } else {
+                            std::cmp::Ordering::Greater
+                        };
+                    }
+                    let cmp = match col {
+                        SortColumn::Name     => unreachable!(),
+                        SortColumn::Size     => a.size.cmp(&b.size),
+                        SortColumn::Modified => a.modified.cmp(&b.modified),
+                    };
+                    if order == SortOrder::Desc { cmp.reverse() } else { cmp }
+                });
+            }
+        }
 
         // Prepend ".." if a parent directory exists — always at index 0,
         // above any sorting.  navigate_into() treats it as a normal dir entry.
@@ -756,10 +775,13 @@ pub enum Popup {
     },
     /// Built-in file viewer (F3) — text or hex mode.
     Viewer {
-        title:    String,
-        content:  Vec<u8>,
-        mode:     ViewerMode,
-        scroll_y: usize,
+        title:           String,
+        content:         Vec<u8>,
+        mode:            ViewerMode,
+        scroll_y:        usize,
+        /// Cached line count (text mode). Computed once at popup creation to
+        /// avoid re-scanning the entire content on every scroll keypress.
+        text_line_count: usize,
     },
     /// Top menu bar (F9) with optional open dropdown.
     Menu {
@@ -962,10 +984,8 @@ impl App {
 
         // When panels are hidden, scroll keys work on the output buffer;
         // cmdline / quit actions fall through to handle_panel_action as usual.
-        if !self.left_panel_visible && !self.right_panel_visible {
-            if self.handle_output_scroll(&action) {
-                return;
-            }
+        if !self.left_panel_visible && !self.right_panel_visible && self.handle_output_scroll(&action) {
+            return;
         }
 
         if !self.popup_stack.is_empty() {
@@ -987,8 +1007,8 @@ impl App {
             // Always browse history regardless of whether cmdline is empty
             Action::MoveUp   => { self.cmdline.history_prev(); true }
             Action::MoveDown => { self.cmdline.history_next(); true }
-            Action::PageUp   => { self.output_scroll = self.output_scroll.saturating_sub(20); true }
-            Action::PageDown => { self.output_scroll = self.output_scroll.saturating_add(20); true }
+            Action::PageUp   => { self.output_scroll = self.output_scroll.saturating_sub(PAGE_SIZE); true }
+            Action::PageDown => { self.output_scroll = self.output_scroll.saturating_add(PAGE_SIZE); true }
             Action::Home     => { self.output_scroll = 0; true }
             Action::End      => { self.output_scroll = self.output_buffer.len().saturating_sub(1); true }
             _ => false,
@@ -1021,8 +1041,8 @@ impl App {
             // Cursor movement still works during search
             Action::MoveUp   => self.active_panel_mut().move_up(),
             Action::MoveDown => self.active_panel_mut().move_down(),
-            Action::PageUp   => self.active_panel_mut().page_up(20),
-            Action::PageDown => self.active_panel_mut().page_down(20),
+            Action::PageUp   => self.active_panel_mut().page_up(PAGE_SIZE),
+            Action::PageDown => self.active_panel_mut().page_down(PAGE_SIZE),
             Action::Home     => self.active_panel_mut().home(),
             Action::End      => self.active_panel_mut().end(),
             _ => {}
@@ -1066,8 +1086,8 @@ impl App {
                     self.active_panel_mut().move_down();
                 }
             }
-            Action::PageUp   => { self.active_panel_mut().page_up(20); }
-            Action::PageDown => { self.active_panel_mut().page_down(20); }
+            Action::PageUp   => { self.active_panel_mut().page_up(PAGE_SIZE); }
+            Action::PageDown => { self.active_panel_mut().page_down(PAGE_SIZE); }
             Action::Home     => { self.active_panel_mut().home(); }
             Action::End      => { self.active_panel_mut().end(); }
 
@@ -1089,7 +1109,7 @@ impl App {
                 } else if self.cmdline.input.is_empty() {
                     self.navigate_into();
                 } else {
-                    let cmd = self.cmdline.take_input();
+                    let cmd = tokio::task::block_in_place(|| self.cmdline.take_input());
                     if let VfsPath::Local(cwd) = self.active_panel().current_path.clone() {
                         info!(cmd = %cmd, cwd = %cwd.display(), "shell: command enqueued");
                         self.pending_action = Some(PendingAction::Shell { cmd, cwd });
@@ -1181,7 +1201,7 @@ impl App {
                     if let Some(entry) = matches.get(idx) {
                         let entry = entry.clone();
                         info!(entry = %entry, "history: entry deleted");
-                        self.cmdline.delete_entry(&entry);
+                        tokio::task::block_in_place(|| self.cmdline.delete_entry(&entry));
                     } else {
                         debug!("history: Shift+Delete pressed but no entry at selected index");
                     }
@@ -1234,7 +1254,7 @@ impl App {
                 if let VfsPath::Local(ref p) = self.active_panel().current_path.clone() {
                     info!(slot = n, path = %p.display(), "bookmark: set");
                     self.bookmarks[n as usize] = Some(p.clone());
-                    self.save_bookmarks();
+                    tokio::task::block_in_place(|| self.save_bookmarks());
                 }
             }
 
@@ -1359,11 +1379,16 @@ impl App {
                                 } else {
                                     entry.name.clone()
                                 };
+                                let text_line_count = raw.iter()
+                                    .filter(|&&b| b == b'\n')
+                                    .count()
+                                    .max(1);
                                 self.popup_stack.push(Popup::Viewer {
                                     title,
                                     content: raw,
                                     mode:     ViewerMode::Text,
                                     scroll_y: 0,
+                                    text_line_count,
                                 });
                             }
                             Err(e) => {
@@ -1509,13 +1534,13 @@ impl App {
             }
             Action::PageUp => {
                 if let Some(Popup::Viewer { scroll_y, .. }) = self.popup_stack.last_mut() {
-                    *scroll_y = scroll_y.saturating_sub(20);
+                    *scroll_y = scroll_y.saturating_sub(PAGE_SIZE);
                 }
             }
             Action::PageDown => {
                 let max = self.viewer_max_scroll();
                 if let Some(Popup::Viewer { scroll_y, .. }) = self.popup_stack.last_mut() {
-                    *scroll_y = (*scroll_y + 20).min(max);
+                    *scroll_y = (*scroll_y + PAGE_SIZE).min(max);
                 }
             }
             Action::Home => {
@@ -1551,17 +1576,10 @@ impl App {
 
     /// Total number of scroll-lines for the top viewer popup in its current mode.
     fn viewer_max_scroll(&self) -> usize {
-        if let Some(Popup::Viewer { content, mode, .. }) = self.popup_stack.last() {
+        if let Some(Popup::Viewer { content, mode, text_line_count, .. }) = self.popup_stack.last() {
             match mode {
-                ViewerMode::Text => {
-                    String::from_utf8_lossy(content)
-                        .lines()
-                        .count()
-                        .saturating_sub(1)
-                }
-                ViewerMode::Hex => {
-                    (content.len() + 15) / 16
-                }
+                ViewerMode::Text => text_line_count.saturating_sub(1),
+                ViewerMode::Hex  => content.len().div_ceil(16),
             }
         } else {
             0
@@ -1602,7 +1620,7 @@ impl App {
                 };
                 if let Some(idx) = slot {
                     self.bookmarks[idx] = None;
-                    self.save_bookmarks();
+                    tokio::task::block_in_place(|| self.save_bookmarks());
                     // Rebuild entries in the popup
                     let new_entries: Vec<(u8, PathBuf)> = self.bookmarks.iter()
                         .enumerate()
@@ -1633,11 +1651,9 @@ impl App {
                 self.popup_stack.pop();
             }
             Action::PopupConfirm | Action::NavigateInto => {
-                if let Some(popup) = self.popup_stack.pop() {
-                    if let Popup::Confirm { action_on_confirm, .. } = popup {
-                        info!(action = ?action_on_confirm, "confirm popup: accepted");
-                        self.execute_confirm_action(action_on_confirm);
-                    }
+                if let Some(Popup::Confirm { action_on_confirm, .. }) = self.popup_stack.pop() {
+                    info!(action = ?action_on_confirm, "confirm popup: accepted");
+                    self.execute_confirm_action(action_on_confirm);
                 }
             }
             _ => {}
@@ -2496,7 +2512,6 @@ impl App {
                     if in_rect(col, row, rect) {
                         self.active_panel = PanelSide::Right;
                         click_panel(&mut self.right_panel, col, row, rect);
-                        return;
                     }
                 }
             }

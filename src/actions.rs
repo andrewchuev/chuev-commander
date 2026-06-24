@@ -5,17 +5,24 @@
 //! `KeyCode`.  This makes key-rebinding trivial: only `key_event_to_action`
 //! needs to change.
 //!
-//! ## Key bindings (Step 2 additions)
-//! | Key        | Action          |
-//! |------------|-----------------|
-//! | Ctrl+F3    | SortByName      |
-//! | Ctrl+F5    | SortByDate      |
-//! | Ctrl+F6    | SortBySize      |
-//! | Ctrl+H     | ToggleHidden    |
-//! | F2         | Refresh         |
-//! | any letter | QuickSearchChar |
-//! | Backspace  | QuickSearchPop (when search active) / NavigateUp |
-//! | Esc        | QuickSearchClear (when search active) / PopupClose |
+//! ## Key bindings
+//! | Key              | Action                  |
+//! |------------------|-------------------------|
+//! | Ctrl+F3          | SortByName              |
+//! | Ctrl+F5          | SortByDate              |
+//! | Ctrl+F6          | SortBySize              |
+//! | Ctrl+H           | ToggleHidden            |
+//! | Ctrl+F           | CmdlineInsertPath       |
+//! | Ctrl+Shift+C     | CopyAbsPathToClipboard  |
+//! | Ctrl+B           | OpenBookmarkManager     |
+//! | Ctrl+0..9        | BookmarkGoto(n)         |
+//! | Ctrl+Shift+0..9  | BookmarkSet(n)          |
+//! | Delete           | CmdlineDeleteForward    |
+//! | Shift+Delete     | HistoryDeleteEntry      |
+//! | F2               | Refresh                 |
+//! | any letter       | CmdlineChar             |
+//! | Backspace        | NavigateUp (Backspace)  |
+//! | Esc              | PopupClose              |
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -45,9 +52,8 @@ pub enum Action {
     SortByDate,
 
     // ── Filtering / display ───────────────────────────────────────────────
-    ToggleHidden,          // Ctrl+H — show/hide dot-files
-    QuickSearchChar(char), // printable char — extend search query
-    Refresh,               // F2 — reload current directory
+    ToggleHidden, // Ctrl+H — show/hide dot-files
+    Refresh,      // F2 — reload current directory
 
     // ── File operations ────────────────────────────────────────────────────
     View,    // F3
@@ -64,26 +70,53 @@ pub enum Action {
     /// Pack the selected/marked files into a new ZIP archive (Shift+F5).
     CreateArchive,
 
+    // ── History popup ─────────────────────────────────────────────────────
+    /// Remove the selected entry from command history (Shift+Delete).
+    HistoryDeleteEntry,
+
     // ── Quick search (Ctrl+S to activate; Esc to exit) ────────────────────
     /// Activate quick-search mode in the active panel.
     QuickSearchActivate, // Ctrl+S
 
     // ── Clipboard ─────────────────────────────────────────────────────────
-    CopyToClipboard,    // Ctrl+C — copy selected/marked entry paths
-    PasteFromClipboard, // Ctrl+V — paste clipboard text into cmdline
+    CopyToClipboard,        // Ctrl+C  — copy selected/marked entry paths
+    CopyAbsPathToClipboard, // Ctrl+Shift+C — always copy absolute path of current entry
+    PasteFromClipboard,     // Ctrl+V — paste clipboard text into cmdline
 
     // ── Command-line ───────────────────────────────────────────────────────
     /// A printable character to append to the command line.
     CmdlineChar(char),
     /// Insert the name of the file under the cursor into the command line.
     CmdlineInsertName, // Ctrl+Enter
+    /// Insert the absolute path of the current entry into the command line.
+    CmdlineInsertPath, // Ctrl+F
     /// Clear the entire command-line input.
     CmdlineClear,      // Ctrl+U
+    /// Extend the cmdline selection one character to the left (Shift+←).
+    CmdlineSelectLeft,
+    /// Extend the cmdline selection one character to the right (Shift+→).
+    CmdlineSelectRight,
 
     // ── Menu navigation ───────────────────────────────────────────────────
     MoveLeft,            // ← — move to previous top-level menu entry
     MoveRight,           // → — move to next top-level menu entry
     SetTheme(ThemeKind), // dispatched from Options submenu
+
+    // ── Bookmarks ─────────────────────────────────────────────────────────
+    /// Navigate the active panel to bookmark number `n` (Ctrl+0..9).
+    BookmarkGoto(u8),
+    /// Save the active panel's current directory as bookmark `n` (Alt+0..9).
+    BookmarkSet(u8),
+    /// Open the bookmark manager popup (Ctrl+B).
+    OpenBookmarkManager,
+
+    // ── Delete key ────────────────────────────────────────────────────────
+    /// The Delete key was pressed.
+    ///
+    /// Context determines the effect:
+    /// * Panel / cmdline mode  — forward-delete the character at the cursor.
+    /// * Bookmark manager popup — remove the selected bookmark entry.
+    CmdlineDeleteForward,
 
     // ── App-level ──────────────────────────────────────────────────────────
     TogglePanelsVisible, // Ctrl+O   — hide/show both panels (see terminal output)
@@ -105,8 +138,31 @@ pub enum Action {
 /// This is the single place that knows about physical key codes.
 /// Everything downstream works with `Action` values only.
 pub fn key_event_to_action(key: &KeyEvent) -> Action {
-    // ── Ctrl combos take priority ──────────────────────────────────────────
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    let ctrl  = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt   = key.modifiers.contains(KeyModifiers::ALT);
+
+    // ── Ctrl+Shift combos (must come before plain Ctrl check) ─────────────
+    if ctrl && shift {
+        return match key.code {
+            KeyCode::Char('c') | KeyCode::Char('C') => Action::CopyAbsPathToClipboard,
+            // Ctrl+Shift+0..9 — save current folder as bookmark
+            KeyCode::Char('0') => Action::BookmarkSet(0),
+            KeyCode::Char('1') => Action::BookmarkSet(1),
+            KeyCode::Char('2') => Action::BookmarkSet(2),
+            KeyCode::Char('3') => Action::BookmarkSet(3),
+            KeyCode::Char('4') => Action::BookmarkSet(4),
+            KeyCode::Char('5') => Action::BookmarkSet(5),
+            KeyCode::Char('6') => Action::BookmarkSet(6),
+            KeyCode::Char('7') => Action::BookmarkSet(7),
+            KeyCode::Char('8') => Action::BookmarkSet(8),
+            KeyCode::Char('9') => Action::BookmarkSet(9),
+            _ => Action::None,
+        };
+    }
+
+    // ── Ctrl combos ────────────────────────────────────────────────────────
+    if ctrl {
         return match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
             KeyCode::Char('h') | KeyCode::Char('H') => Action::ToggleHidden,
@@ -115,6 +171,19 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
             KeyCode::Char('o') | KeyCode::Char('O') => Action::TogglePanelsVisible,
             KeyCode::Char('c') | KeyCode::Char('C') => Action::CopyToClipboard,
             KeyCode::Char('v') | KeyCode::Char('V') => Action::PasteFromClipboard,
+            KeyCode::Char('f') | KeyCode::Char('F') => Action::CmdlineInsertPath,
+            KeyCode::Char('b') | KeyCode::Char('B') => Action::OpenBookmarkManager,
+            // Ctrl+0..9 — go to bookmark
+            KeyCode::Char('0') => Action::BookmarkGoto(0),
+            KeyCode::Char('1') => Action::BookmarkGoto(1),
+            KeyCode::Char('2') => Action::BookmarkGoto(2),
+            KeyCode::Char('3') => Action::BookmarkGoto(3),
+            KeyCode::Char('4') => Action::BookmarkGoto(4),
+            KeyCode::Char('5') => Action::BookmarkGoto(5),
+            KeyCode::Char('6') => Action::BookmarkGoto(6),
+            KeyCode::Char('7') => Action::BookmarkGoto(7),
+            KeyCode::Char('8') => Action::BookmarkGoto(8),
+            KeyCode::Char('9') => Action::BookmarkGoto(9),
             // Ctrl+Enter — insert filename into command line
             KeyCode::Enter => Action::CmdlineInsertName,
             // Ctrl+Up/Down — resize panels vertically
@@ -128,16 +197,19 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
         };
     }
 
-    if key.modifiers.contains(KeyModifiers::SHIFT) {
+    if shift {
         return match key.code {
-            KeyCode::F(5) => Action::CreateArchive,
-            KeyCode::F(6) => Action::Rename,
-            _ => Action::None,
+            KeyCode::F(5)    => Action::CreateArchive,
+            KeyCode::F(6)    => Action::Rename,
+            KeyCode::Left    => Action::CmdlineSelectLeft,
+            KeyCode::Right   => Action::CmdlineSelectRight,
+            KeyCode::Delete  => Action::HistoryDeleteEntry,
+            _                => Action::None,
         };
     }
 
-    // Alt combos reserved for future use (bookmarks, history navigation)
-    if key.modifiers.contains(KeyModifiers::ALT) {
+    // Alt combos reserved for future use
+    if alt {
         return Action::None;
     }
 
@@ -150,6 +222,7 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
         KeyCode::End       => Action::End,
         KeyCode::Enter     => Action::NavigateInto,
         KeyCode::Backspace => Action::NavigateUp, // app.rs decides if this pops search
+        KeyCode::Delete    => Action::CmdlineDeleteForward,
         KeyCode::Left      => Action::MoveLeft,
         KeyCode::Right     => Action::MoveRight,
         KeyCode::Tab       => Action::TogglePanel,

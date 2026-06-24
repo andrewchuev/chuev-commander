@@ -100,6 +100,13 @@ pub struct Theme {
     pub popup_input_field:  Style,
     pub popup_input_cursor: Style,
     pub popup_gauge:        Style,
+
+    // ── History suggestion overlay (non-modal, above cmdline) ─────────────
+    pub history_popup_bg:       Style,
+    pub history_popup_item:     Style,
+    pub history_popup_selected: Style,
+    pub history_popup_sep:      Style,
+    pub history_popup_hint:     Style,
 }
 
 impl Theme {
@@ -204,6 +211,12 @@ impl Theme {
             popup_input_field:  Style::default().fg(Color::Black).bg(Color::White),
             popup_input_cursor: Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::SLOW_BLINK),
             popup_gauge:        Style::default().fg(Color::Cyan).bg(Color::DarkGray),
+
+            history_popup_bg:       Style::default().bg(Color::Blue),
+            history_popup_item:     Style::default().fg(Color::White).bg(Color::Blue),
+            history_popup_selected: Style::default().fg(Color::Black).bg(Color::Cyan),
+            history_popup_sep:      Style::default().fg(Color::Cyan).bg(Color::Blue),
+            history_popup_hint:     Style::default().fg(Color::White).bg(Color::Blue),
         }
     }
 
@@ -265,6 +278,12 @@ impl Theme {
             popup_input_field:  Style::default().fg(Color::Black).bg(Color::White),
             popup_input_cursor: Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
             popup_gauge:        Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+
+            history_popup_bg:       Style::default().bg(Color::DarkGray),
+            history_popup_item:     Style::default().fg(Color::White).bg(Color::DarkGray),
+            history_popup_selected: Style::default().fg(Color::Black).bg(Color::Yellow),
+            history_popup_sep:      Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+            history_popup_hint:     Style::default().fg(Color::White).bg(Color::DarkGray),
         }
     }
 }

@@ -95,7 +95,8 @@ async fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     // Channel created before App so we can pass the sender in
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
 
-    let mut app = App::new(provider, tx.clone()).context("initialising app state")?;
+    let mut app = tokio::task::block_in_place(|| App::new(provider, tx.clone()))
+        .context("initialising app state")?;
 
     // System clipboard — None if arboard cannot connect (e.g. no display server)
     let mut clipboard = arboard::Clipboard::new().ok();
@@ -268,7 +269,7 @@ async fn run(term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         }
     }
 
-    app.save_panel_state();
+    tokio::task::block_in_place(|| app.save_panel_state());
     Ok(())
 }
 
@@ -335,20 +336,18 @@ fn parse_cd_arg(cmd: &str) -> Option<&str> {
 /// Resolve the cd argument to an absolute `PathBuf`.
 /// `~` / `~/…` is expanded to the home directory; relative paths are joined
 /// onto `cwd`; absolute paths are used as-is.
-fn resolve_cd_path(arg: &str, cwd: &PathBuf) -> PathBuf {
+fn resolve_cd_path(arg: &str, cwd: &Path) -> PathBuf {
     if arg.is_empty() || arg == "~" {
-        return dirs::home_dir().unwrap_or_else(|| cwd.clone());
+        return dirs::home_dir().unwrap_or_else(|| cwd.to_path_buf());
     }
     if arg == "-" {
         // "cd -" would need OLDPWD tracking; not implemented — treat as home
-        return dirs::home_dir().unwrap_or_else(|| cwd.clone());
+        return dirs::home_dir().unwrap_or_else(|| cwd.to_path_buf());
     }
-    let expanded = if arg.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            home.join(&arg[2..])
-        } else {
-            PathBuf::from(arg)
-        }
+    let expanded = if let Some(rel) = arg.strip_prefix("~/") {
+        dirs::home_dir()
+            .map(|home| home.join(rel))
+            .unwrap_or_else(|| PathBuf::from(arg))
     } else {
         PathBuf::from(arg)
     };
@@ -409,10 +408,6 @@ async fn tick_producer(tx: EventSender, interval: Duration) {
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Logging setup
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests

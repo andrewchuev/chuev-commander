@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 /// Progress report sent by a background copy / move task.
 #[derive(Debug, Clone)]
 pub struct ProgressData {
-    /// Human-readable operation name shown in the popup title ("Copying", "Moving").
-    pub operation:   String,
+    /// Human-readable operation name ("Copying", "Moving", "Extracting", …).
+    pub operation:   &'static str,
     /// Base name of the file being processed (display only).
     pub source_name: String,
     pub bytes_done:  u64,
@@ -28,9 +28,4 @@ pub enum AppEvent {
     Tick,
 }
 
-pub type EventSender   = mpsc::Sender<AppEvent>;
-pub type EventReceiver = mpsc::Receiver<AppEvent>;
-
-pub fn create_event_channel(buffer: usize) -> (EventSender, EventReceiver) {
-    mpsc::channel(buffer)
-}
+pub type EventSender = mpsc::Sender<AppEvent>;
