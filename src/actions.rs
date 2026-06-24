@@ -16,7 +16,6 @@
 //! | Ctrl+Shift+C     | CopyAbsPathToClipboard  |
 //! | Ctrl+B           | OpenBookmarkManager     |
 //! | Ctrl+0..9        | BookmarkGoto(n)         |
-//! | Ctrl+Shift+0..9  | BookmarkSet(n)          |
 //! | Delete           | CmdlineDeleteForward    |
 //! | Shift+Delete     | HistoryDeleteEntry      |
 //! | F2               | Refresh                 |
@@ -105,8 +104,6 @@ pub enum Action {
     // ── Bookmarks ─────────────────────────────────────────────────────────
     /// Navigate the active panel to bookmark number `n` (Ctrl+0..9).
     BookmarkGoto(u8),
-    /// Save the active panel's current directory as bookmark `n` (Alt+0..9).
-    BookmarkSet(u8),
     /// Open the bookmark manager popup (Ctrl+B).
     OpenBookmarkManager,
 
@@ -146,17 +143,6 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
     if ctrl && shift {
         return match key.code {
             KeyCode::Char('c') | KeyCode::Char('C') => Action::CopyAbsPathToClipboard,
-            // Ctrl+Shift+0..9 — save current folder as bookmark
-            KeyCode::Char('0') => Action::BookmarkSet(0),
-            KeyCode::Char('1') => Action::BookmarkSet(1),
-            KeyCode::Char('2') => Action::BookmarkSet(2),
-            KeyCode::Char('3') => Action::BookmarkSet(3),
-            KeyCode::Char('4') => Action::BookmarkSet(4),
-            KeyCode::Char('5') => Action::BookmarkSet(5),
-            KeyCode::Char('6') => Action::BookmarkSet(6),
-            KeyCode::Char('7') => Action::BookmarkSet(7),
-            KeyCode::Char('8') => Action::BookmarkSet(8),
-            KeyCode::Char('9') => Action::BookmarkSet(9),
             _ => Action::None,
         };
     }

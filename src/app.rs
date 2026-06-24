@@ -1262,17 +1262,9 @@ impl App {
                 } else {
                     debug!(slot = n, "bookmark: slot empty — showing error");
                     self.push_error(format!(
-                        "Bookmark {} is not set.  Press Ctrl+Shift+{} to save the current folder.",
-                        n, n
+                        "Bookmark {} is not set.  Open the bookmark manager (Ctrl+B) and press Ins to add the current folder.",
+                        n
                     ));
-                }
-            }
-
-            Action::BookmarkSet(n) => {
-                if let VfsPath::Local(ref p) = self.active_panel().current_path.clone() {
-                    info!(slot = n, path = %p.display(), "bookmark: set");
-                    self.bookmarks[n as usize] = Some(p.clone());
-                    tokio::task::block_in_place(|| self.save_bookmarks());
                 }
             }
 
@@ -1625,6 +1617,30 @@ impl App {
                     self.popup_stack.pop();
                     if let Some(p) = path {
                         self.navigate_active_to(p);
+                    }
+                }
+            }
+            // Insert — add current panel folder to the first free bookmark slot
+            Action::Select => {
+                if let VfsPath::Local(ref p) = self.active_panel().current_path.clone() {
+                    if let Some(slot) = self.bookmarks.iter().position(|b| b.is_none()) {
+                        info!(slot, path = %p.display(), "bookmark: added via popup Insert");
+                        self.bookmarks[slot] = Some(p.clone());
+                        tokio::task::block_in_place(|| self.save_bookmarks());
+                        let new_entries: Vec<(u8, PathBuf)> = self.bookmarks.iter()
+                            .enumerate()
+                            .filter_map(|(i, opt)| opt.as_ref().map(|p| (i as u8, p.clone())))
+                            .collect();
+                        let new_selected = new_entries.len().saturating_sub(1);
+                        if let Some(Popup::BookmarkManager { entries, selected }) = self.popup_stack.last_mut() {
+                            *selected = new_selected;
+                            *entries  = new_entries;
+                        }
+                    } else {
+                        debug!("bookmark: all 10 slots full");
+                        self.push_error(
+                            "All 10 bookmark slots are occupied. Delete one first (Del key)."
+                        );
                     }
                 }
             }

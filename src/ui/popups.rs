@@ -459,8 +459,8 @@ fn render_bookmark_manager(
 
     if entries.is_empty() {
         let msg = Paragraph::new(
-            "\n  No bookmarks set.\n\
-               \n  Ctrl+Shift+0..9  — save current folder as bookmark\n\
+            "\n  No bookmarks yet.\n\
+               \n  Press [Ins] to add the current folder as a bookmark.\n\
                \n  [Esc] Close"
         )
         .style(theme.popup_text);
@@ -505,7 +505,7 @@ fn render_bookmark_manager(
 
     frame.render_widget(Paragraph::new(lines), list_area);
     frame.render_widget(
-        Paragraph::new(" [Enter] Go   [Del] Remove   [Ctrl+Shift+0..9] Set   [Esc] Close")
+        Paragraph::new(" [Enter] Go   [Ins] Add   [Del] Remove   [Esc] Close")
             .style(theme.popup_hint),
         hint_area,
     );
