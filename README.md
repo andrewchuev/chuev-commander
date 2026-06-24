@@ -27,8 +27,10 @@ F2 Refresh  F3 View  F4 Edit  F5 Copy/Extract  F6 Move  F7 MkDir  F8 Del  F9 Men
 - **ZIP archive creation** (Shift+F5) — packs selected/marked files and directories into a new compressed ZIP; an input popup lets you name the archive; created in the other panel's directory
 - **Always-active command line** — every printable key types into the command bar; Enter executes
 - **`cd` navigation** — typing `cd <path>` navigates the active panel directly; supports `~`, `~/path`, relative, and absolute paths; errors shown as a popup
-- **Shell output buffer** — captured stdout/stderr of commands displayed in-panel (Ctrl+O toggles)
+- **`clear` / `cls` built-in** — clears the shell output buffer without spawning a subprocess
+- **Shell output buffer** — captured stdout/stderr of commands displayed in-panel (Ctrl+O toggles); scroll with ↑/↓/PgUp/PgDn
 - **Command history** — Up/Down browses previous commands; persisted to disk across sessions
+- **History suggestion popup** — appears automatically as you type; the first (blank) row executes the current command line as-is; selecting a history entry and pressing Enter executes it immediately; Shift+Delete removes an entry from history
 - **Quick search** (Ctrl+S) — incremental prefix search jumps the cursor as you type
 - **File viewer** (F3) — text and hex modes with scrolling; works on files inside archives
 - **External editor** (F4) — opens `$VISUAL` / `$EDITOR` / `vi`; keyboard input is fully handed over to the editor, TUI restores cleanly on exit
@@ -42,34 +44,46 @@ F2 Refresh  F3 View  F4 Edit  F5 Copy/Extract  F6 Move  F7 MkDir  F8 Del  F9 Men
 - **Adjustable panel height** — Ctrl+Down shrinks both panels to reveal a shell output strip below; Ctrl+Up grows them back; height (10–100 %) is saved and restored across sessions
 - **Panel state persistence** — both panels' paths, cursor positions, active theme, and panel height are saved on exit and restored on next launch; stored in `$XDG_CACHE_HOME/chuev-commander/panel_state`
 - **Navigate-up cursor placement** — when going to the parent directory (Backspace or Enter on `..`), the cursor lands on the directory just left
-- **System clipboard** — Ctrl+C copies the selected/marked entry paths to the clipboard; Ctrl+V pastes clipboard text into the command line (requires a running display server)
+- **Folder bookmarks** — Ctrl+B opens the bookmark manager; press Insert inside the popup to save the current folder into the next free slot (0–9); navigate directly to any bookmark with Ctrl+0–9
+- **System clipboard**:
+  - `Ctrl+C` — copy selected/marked entry paths
+  - `Ctrl+Shift+C` — copy the absolute path of the entry under the cursor
+  - `Ctrl+V` — paste clipboard text into the command line
+  - `Ctrl+Alt+Shift+C` — copy the entire shell output buffer as plain text
 - **Mouse support** — left-click focuses a panel and moves the cursor to the clicked entry; scroll wheel scrolls entries in the active panel (or the output buffer in Ctrl+O mode)
 - **Main menu** (F9) — horizontal menu bar with keyboard-navigable dropdowns: Left, Files, Commands, Options, Right
 - **Color schemes** — two built-in themes selectable from the Options menu: *Blue Classic* (default) and *Dos Navigator*; theme persists between launches
 - **F-key bar** — proportionally stretched across the full terminal width
-- **File-based logging** — all output goes to `$XDG_CACHE_HOME/chuev-commander/debug.log`; terminal is never polluted
+- **File-based logging** — all output goes to a per-session log file under `$XDG_CACHE_HOME/chuev-commander/`; the terminal is never polluted; set `RUST_LOG=trace` for verbose output
 
 ## Key Bindings
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Move cursor (or browse command history when cmdline is non-empty) |
+| `↑` / `↓` | Move cursor; navigate history suggestion popup when it is visible |
 | `PgUp` / `PgDn` | Page up / page down |
 | `Home` / `End` | Jump to first / last entry |
-| `Enter` | Navigate into directory, or execute command line |
-| `Backspace` | Delete last character in the command line |
+| `Enter` | Navigate into directory, execute command line, or confirm selection in a popup |
+| `Backspace` | Delete last character in the command line / go to parent directory when cmdline is empty |
 | `Tab` | Switch active panel |
-| `Insert` | Toggle mark on current entry |
+| `Insert` | Toggle mark on current entry; add current folder to bookmarks (inside bookmark manager) |
+| `Shift+Delete` | Remove the selected entry from command history (inside history popup) |
 | `Ctrl+S` | Activate quick-search mode |
 | `Ctrl+H` | Toggle hidden files |
 | `Ctrl+O` | Toggle panels / shell output buffer view |
 | `Ctrl+↑` / `Ctrl+↓` | Grow / shrink panels height |
 | `Ctrl+C` | Copy selected/marked entry paths to system clipboard |
+| `Ctrl+Shift+C` | Copy absolute path of the entry under the cursor to clipboard |
+| `Ctrl+Alt+Shift+C` | Copy the entire shell output buffer to clipboard |
 | `Ctrl+V` | Paste clipboard text into command line |
 | `Ctrl+U` | Clear command line |
 | `Ctrl+Enter` | Insert current filename into command line |
+| `Ctrl+F` | Insert absolute path of current entry into command line |
+| `Ctrl+B` | Open folder bookmark manager |
+| `Ctrl+0`–`9` | Navigate active panel to bookmark slot 0–9 |
 | `←` / `→` | Navigate between top-level menu items (when menu is open) |
 | `Ctrl+Q` | Quit |
+| `Esc` | Close popup / clear command line / close history popup |
 | `F2` | Refresh current directory |
 | `F3` | View file (text / hex) |
 | `F4` | Edit file in `$EDITOR` |
@@ -84,7 +98,6 @@ F2 Refresh  F3 View  F4 Edit  F5 Copy/Extract  F6 Move  F7 MkDir  F8 Del  F9 Men
 | `Ctrl+F3` | Sort by name |
 | `Ctrl+F5` | Sort by date |
 | `Ctrl+F6` | Sort by size |
-| `Esc` | Close popup / clear command line |
 
 ## Architecture
 
@@ -109,26 +122,26 @@ ui::render(Frame, App)  ← ui/: reads App, draws widgets — never mutates stat
 
 | Module | Responsibility |
 |--------|---------------|
-| `main.rs` | Entry point — terminal init/restore, async event loop, producer tasks; `cd` built-in handling |
+| `main.rs` | Entry point — terminal init/restore, async event loop, producer tasks; `cd`/`clear`/`cls` built-in handling |
 | `events.rs` | `AppEvent` enum and typed `mpsc` channel shared by all producers |
 | `actions.rs` | `Action` enum + `key_event_to_action` — single point of key-binding logic |
-| `app.rs` | `App` struct (full application state), `PanelState`, popup stack, `CmdLine` |
+| `app.rs` | `App` struct (full application state), `PanelState`, popup stack, `CmdLine`, bookmark manager, history popup |
 | `theme.rs` | `Theme` struct + `ThemeKind` enum; two built-in color schemes |
 | `menu.rs` | Menu bar titles and per-dropdown item definitions |
+| `platform.rs` | Unix `statvfs` wrapper for free-space query |
+| `editor.rs` | TUI suspend/restore around `$EDITOR` launch |
+| `shell.rs` | Interactive shell execution via PTY with stdout/stderr capture |
+| `ops.rs` | Async copy/move/extract/create-archive with `CancellationToken` and per-entry progress |
 | `vfs/mod.rs` | `VfsProvider` trait, `VfsPath`, `VfsFileInfo`, `ArchiveFormat::detect` |
 | `vfs/local.rs` | `LocalFsProvider` — reads the local filesystem |
 | `vfs/archive.rs` | ZIP/TAR listing, reading, extraction, selective entry extraction, ZIP creation |
 | `vfs/router.rs` | `RoutingProvider` — dispatches by `VfsPath` variant and `ArchiveFormat` |
-| `platform.rs` | Unix `statvfs` wrapper for free-space query |
-| `editor.rs` | TUI suspend/restore around `$EDITOR` launch |
-| `shell.rs` | Interactive shell execution with stdout/stderr capture |
-| `ops.rs` | Async copy/move/extract/create-archive with `CancellationToken` and per-entry progress |
 | `ui/mod.rs` | Top-level `render` function, layout split |
 | `ui/panels.rs` | Dual-panel file listing with column layout |
 | `ui/cmdline.rs` | Command-line bar renderer |
 | `ui/output.rs` | Shell output buffer view (Ctrl+O mode) |
 | `ui/menu.rs` | F9 menu bar and dropdown overlay rendering |
-| `ui/popups.rs` | Modal stack: Error, Confirm, Input, Progress, Viewer, Menu |
+| `ui/popups.rs` | Modal stack: Error, Confirm, Input, Progress, Viewer, BookmarkManager; history suggestion overlay |
 | `ui/status.rs` | F-key hint bar |
 
 ### Virtual Filesystem
@@ -177,13 +190,16 @@ Modals are stored as `Vec<Popup>` on `App`. The topmost entry is rendered over t
 ```rust
 pub enum Popup {
     Error(String),
-    Confirm  { title, message, action_on_confirm },
-    Input    { title, prompt, value, on_confirm },
-    Progress { title, source_name, bytes_done, bytes_total, is_move },
-    Viewer   { title, content: Vec<u8>, mode: ViewerMode, scroll_y },
-    Menu     { top_idx, sub_idx, open },
+    Confirm        { title, message, action_on_confirm },
+    Input          { title, prompt, value, on_confirm },
+    Progress       { title, source_name, bytes_done, bytes_total, is_move },
+    Viewer         { title, content: Vec<u8>, mode: ViewerMode, scroll_y, text_line_count },
+    Menu           { top_idx, sub_idx, open },
+    BookmarkManager { entries: Vec<(u8, PathBuf)>, selected },
 }
 ```
+
+The history suggestion popup (`HistoryPopupState`) is a separate non-modal overlay that coexists with the panel beneath it. It is not part of the modal stack and does not block panel interaction.
 
 ## Building
 
@@ -194,6 +210,8 @@ cargo build --release
 Requires Rust 1.75+ (edition 2021). No system dependencies beyond a Unix terminal.
 
 The binary lands at `target/release/chuev-commander`.
+
+> **Note:** The current codebase targets Unix (Linux / macOS). The stdin-forward thread in `shell.rs` uses `libc::poll` and several platform-specific calls that do not compile on Windows.
 
 ## Testing
 
@@ -215,4 +233,4 @@ UI rendering (ratatui widgets) is intentionally not tested — it is never the s
 
 ## Logging
 
-All log output is written to `$XDG_CACHE_HOME/chuev-commander/debug.log` (Linux) or `~/Library/Caches/chuev-commander/debug.log` (macOS). The terminal is never touched by log messages. Set `RUST_LOG=trace` to increase verbosity.
+Each session writes its log to a timestamped file under `$XDG_CACHE_HOME/chuev-commander/` (Linux) or `~/Library/Caches/chuev-commander/` (macOS). The terminal is never touched by log messages. Set `RUST_LOG=trace` to increase verbosity.
