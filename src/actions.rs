@@ -14,6 +14,7 @@
 //! | Ctrl+H           | ToggleHidden            |
 //! | Ctrl+F           | CmdlineInsertPath       |
 //! | Tab              | TabComplete (panels hidden) / switch panel (panels visible) |
+//! | Alt+char         | QuickSearchChar — activate / extend quick-search in panel |
 //! | Ctrl+Shift+C     | CopyAbsPathToClipboard  |
 //! | Ctrl+Alt+Shift+C | CopyOutputToClipboard   |
 //! | Ctrl+B           | OpenBookmarkManager     |
@@ -77,9 +78,10 @@ pub enum Action {
     /// Remove the selected entry from command history (Shift+Delete).
     HistoryDeleteEntry,
 
-    // ── Quick search (Ctrl+S to activate; Esc to exit) ────────────────────
-    /// Activate quick-search mode in the active panel.
-    QuickSearchActivate, // Ctrl+S
+    // ── Quick search (Alt+char to activate; Esc / Enter to exit) ─────────
+    /// Alt+char: enter (or extend) quick-search mode in the active panel.
+    /// The character is appended directly to the search query.
+    QuickSearchChar(char),
 
     // ── Clipboard ─────────────────────────────────────────────────────────
     CopyToClipboard,        // Ctrl+C  — copy selected/marked entry paths
@@ -165,7 +167,6 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
         return match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
             KeyCode::Char('h') | KeyCode::Char('H') => Action::ToggleHidden,
-            KeyCode::Char('s') | KeyCode::Char('S') => Action::QuickSearchActivate,
             KeyCode::Char('u') | KeyCode::Char('U') => Action::CmdlineClear,
             KeyCode::Char('o') | KeyCode::Char('O') => Action::TogglePanelsVisible,
             KeyCode::Char('c') | KeyCode::Char('C') => Action::CopyToClipboard,
@@ -207,9 +208,12 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
         };
     }
 
-    // Alt combos reserved for future use
+    // Alt+char → quick-search (activate or extend)
     if alt {
-        return Action::None;
+        return match key.code {
+            KeyCode::Char(c) => Action::QuickSearchChar(c),
+            _ => Action::None,
+        };
     }
 
     match key.code {

@@ -420,7 +420,7 @@ pub struct PanelState {
     /// Cleared on directory change.
     pub selected_names: HashSet<String>,
 
-    /// `true` while Ctrl+S quick-search mode is active.
+    /// `true` while Alt+char quick-search mode is active.
     /// In Variant-A routing, typed characters normally go to the command line;
     /// this flag redirects them to the panel's quick-search filter instead.
     pub search_mode: bool,
@@ -1051,8 +1051,10 @@ impl App {
     /// Navigation keys still work so the user can see results while filtering.
     fn handle_search_action(&mut self, action: Action) {
         match action {
-            // Typed characters extend the filter
-            Action::CmdlineChar(c) => self.active_panel_mut().push_quick_search(c),
+            // Plain char or Alt+char: extend the search filter.
+            Action::CmdlineChar(c) | Action::QuickSearchChar(c) => {
+                self.active_panel_mut().push_quick_search(c);
+            }
             // Backspace: shrink filter; empty → exit search mode
             Action::NavigateUp => {
                 let panel = self.active_panel_mut();
@@ -1189,10 +1191,10 @@ impl App {
             // ── Filtering / search ────────────────────────────────────────
             Action::ToggleHidden => self.active_panel_mut().toggle_hidden(),
 
-            // Ctrl+S — activate quick-search mode (Variant A)
-            Action::QuickSearchActivate => {
-                self.cmdline.clear();
+            // Alt+char — activate quick-search and push the first character.
+            Action::QuickSearchChar(c) => {
                 self.active_panel_mut().enter_search_mode();
+                self.active_panel_mut().push_quick_search(c);
             }
 
             // Typed characters go to cmdline; refresh history popup afterwards.
