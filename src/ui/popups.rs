@@ -18,6 +18,8 @@ use ratatui::{
 
 /// Maximum rows shown in the history suggestion popup.
 const HISTORY_POPUP_MAX_ITEMS: u16 = 15;
+/// Maximum rows shown in the path-completion popup.
+const COMPLETION_POPUP_MAX_ITEMS: u16 = 15;
 
 use crate::app::{Popup, ViewerMode};
 use crate::theme::Theme;
@@ -427,6 +429,100 @@ pub fn render_history_popup(
     frame.render_widget(
         Paragraph::new(format!(
             " ↑↓ navigate   Enter execute   Esc close   Shift+Del delete   ({}/{})",
+            selected_idx + 1, total_items
+        ))
+        .style(theme.history_popup_hint),
+        hint_area,
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Path-completion popup
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Render the Tab-triggered path-completion overlay above the command line.
+///
+/// Visual layout matches the history popup: item 0 is a blank sentinel (keep
+/// current input), items 1..n show the matching file/directory names.
+/// Directories are suffixed with `/`.
+pub fn render_completion_popup(
+    frame:        &mut Frame,
+    completions:  &[(String, bool)],
+    selected_idx: usize,
+    cmdline_area: Rect,
+    full_area:    Rect,
+    theme:        &Theme,
+) {
+    if completions.is_empty() { return; }
+
+    let total_items = completions.len() + 1; // +1 for blank sentinel
+    let n_items   = (total_items as u16).min(COMPLETION_POPUP_MAX_ITEMS);
+    let hint_rows = 1_u16;
+    let sep_rows  = 1_u16;
+    let needed    = n_items + hint_rows + sep_rows;
+
+    let avail = cmdline_area.y.saturating_sub(full_area.y);
+    if avail == 0 { return; }
+
+    let popup_h = needed.min(avail);
+    let list_h  = popup_h.saturating_sub(hint_rows + sep_rows);
+
+    let popup_y = cmdline_area.y.saturating_sub(popup_h);
+    let popup_area = Rect {
+        x: full_area.x, y: popup_y,
+        width: full_area.width, height: popup_h,
+    };
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(Block::default().style(theme.history_popup_bg), popup_area);
+
+    let list_area = Rect { height: list_h, ..popup_area };
+    let sep_area  = Rect { y: popup_area.y + list_h, height: sep_rows, ..popup_area };
+    let hint_area = Rect { y: popup_area.y + list_h + sep_rows, height: hint_rows, ..popup_area };
+
+    let scroll = if selected_idx >= list_h as usize {
+        selected_idx + 1 - list_h as usize
+    } else {
+        0
+    };
+
+    let item_w = popup_area.width.saturating_sub(4) as usize;
+
+    let lines: Vec<Line> = (0..total_items)
+        .skip(scroll)
+        .take(list_h as usize)
+        .map(|i| {
+            let is_sel = i == selected_idx;
+            let style  = if is_sel { theme.history_popup_selected } else { theme.history_popup_item };
+            let marker = if is_sel { "►" } else { " " };
+            let display = if i == 0 {
+                String::new()
+            } else {
+                let (name, is_dir) = &completions[i - 1];
+                let label = if *is_dir { format!("{name}/") } else { name.clone() };
+                if label.chars().count() > item_w {
+                    let t: String = label.chars().take(item_w.saturating_sub(1)).collect();
+                    format!("{t}…")
+                } else {
+                    label
+                }
+            };
+            Line::from(Span::styled(format!(" {marker} {display}"), style))
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), list_area);
+
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(theme.history_popup_sep),
+        sep_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(format!(
+            " ↑↓/Tab navigate   Enter complete   Esc close   ({}/{})",
             selected_idx + 1, total_items
         ))
         .style(theme.history_popup_hint),

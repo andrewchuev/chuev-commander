@@ -18,7 +18,7 @@ use crate::app::{App, PanelSide};
 use cmdline::render_cmdline;
 use output::render_output;
 use panels::render_panel;
-use popups::{render_history_popup, render_top_popup};
+use popups::{render_completion_popup, render_history_popup, render_top_popup};
 use status::render_status_bar;
 
 /// Draw the entire UI for a single frame.
@@ -78,6 +78,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Some(ref hp) = app.history_popup {
         let matches = app.cmdline.history_matches(&app.cmdline.input.clone());
         render_history_popup(frame, &matches, hp.selected_idx, cmdline_area, area, theme);
+    }
+
+    // ── Path-completion popup (above cmdline, shown on Tab in panels-hidden mode) ─
+    if let Some(ref cp) = app.completion_popup {
+        render_completion_popup(frame, &cp.completions, cp.selected_idx, cmdline_area, area, theme);
     }
 
     // ── Command line ──────────────────────────────────────────────────────

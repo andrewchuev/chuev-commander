@@ -835,6 +835,27 @@ pub struct HistoryPopupState {
     pub selected_idx: usize,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Path-completion overlay (non-modal, panels-hidden mode)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// State for the Tab-triggered path-completion overlay.
+///
+/// Like `HistoryPopupState`, this lives outside the modal popup stack so the
+/// command line remains editable while the suggestions are visible.
+#[derive(Debug)]
+pub struct CompletionPopupState {
+    /// 0 = blank sentinel (keep current input); `i > 0` selects `completions[i-1]`.
+    pub selected_idx: usize,
+    /// Matching entries: `(name, is_dir)`.  Directories will be displayed and
+    /// applied with a trailing `/`.
+    pub completions: Vec<(String, bool)>,
+    /// Byte offset in `cmdline.input` where the last path token starts.
+    pub token_start: usize,
+    /// Directory portion of the token (e.g. `"/etc/nginx/"` or `""`).
+    pub dir_prefix: String,
+}
+
 pub struct App {
     pub left_panel:  PanelState,
     pub right_panel: PanelState,
@@ -905,6 +926,9 @@ pub struct App {
     /// `cmdline.input == history_popup_closed_for`.
     history_popup_closed_for: String,
 
+    /// Path-completion overlay shown on Tab when panels are hidden (`None` = hidden).
+    pub completion_popup: Option<CompletionPopupState>,
+
     /// Sender half of the AppEvent channel — cloned into spawned I/O tasks.
     tx:       EventSender,
     provider: Arc<dyn VfsProvider>,
@@ -941,6 +965,7 @@ impl App {
             bookmarks:                 std::array::from_fn(|_| None),
             history_popup:             None,
             history_popup_closed_for:  String::new(),
+            completion_popup:          None,
             tx,
             provider,
         };
@@ -979,6 +1004,11 @@ impl App {
         if action == Action::PanelHeightShrink {
             self.panels_height_percent = self.panels_height_percent.saturating_sub(10).max(10);
             debug!(pct = self.panels_height_percent, "panels: height shrunk");
+            return;
+        }
+
+        // Completion popup captures Up/Down/Tab/Enter/Esc before other handlers.
+        if self.completion_popup.is_some() && self.handle_completion_popup_action(&action) {
             return;
         }
 
@@ -1058,12 +1088,16 @@ impl App {
                 self.should_quit = true;
             }
 
-            Action::TogglePanel => {
-                self.active_panel = match self.active_panel {
-                    PanelSide::Left  => PanelSide::Right,
-                    PanelSide::Right => PanelSide::Left,
-                };
-                debug!(panel = ?self.active_panel, "panel: focus switched");
+            Action::TabComplete => {
+                if !self.left_panel_visible && !self.right_panel_visible {
+                    self.trigger_completion();
+                } else {
+                    self.active_panel = match self.active_panel {
+                        PanelSide::Left  => PanelSide::Right,
+                        PanelSide::Right => PanelSide::Left,
+                    };
+                    debug!(panel = ?self.active_panel, "panel: focus switched");
+                }
             }
 
             // ── Cursor movement ───────────────────────────────────────────
@@ -2381,6 +2415,148 @@ impl App {
                 p.selected_idx = p.selected_idx.min(n);
             }
         }
+    }
+
+    // ── Path-completion overlay ───────────────────────────────────────────
+
+    /// Route an action through the completion popup.
+    /// Returns `true` if the action was consumed (do not process further).
+    fn handle_completion_popup_action(&mut self, action: &Action) -> bool {
+        match action {
+            Action::MoveUp => {
+                if let Some(ref mut p) = self.completion_popup {
+                    p.selected_idx = p.selected_idx.saturating_sub(1);
+                }
+                true
+            }
+            Action::MoveDown | Action::TabComplete => {
+                if let Some(ref mut p) = self.completion_popup {
+                    // total items = 1 blank sentinel + completions.len()
+                    if p.selected_idx < p.completions.len() {
+                        p.selected_idx += 1;
+                    }
+                }
+                true
+            }
+            Action::NavigateInto | Action::PopupConfirm => {
+                self.apply_completion();
+                true
+            }
+            Action::PopupClose => {
+                debug!("completion popup: dismissed");
+                self.completion_popup = None;
+                true
+            }
+            // Any other key: close popup and let the action propagate normally.
+            _ => {
+                self.completion_popup = None;
+                false
+            }
+        }
+    }
+
+    /// Apply the currently-selected completion to the command line and close the popup.
+    fn apply_completion(&mut self) {
+        if let Some(ref popup) = self.completion_popup {
+            if popup.selected_idx > 0 {
+                if let Some((name, is_dir)) = popup.completions.get(popup.selected_idx - 1) {
+                    let suffix = if *is_dir { format!("{name}/") } else { name.clone() };
+                    let new_input = format!(
+                        "{}{}{}",
+                        &self.cmdline.input[..popup.token_start],
+                        popup.dir_prefix,
+                        suffix,
+                    );
+                    debug!(input = %new_input, "completion: applied");
+                    self.cmdline.clear();
+                    self.cmdline.insert_str(&new_input);
+                }
+            }
+            // idx == 0: blank sentinel — keep current input unchanged
+        }
+        self.completion_popup = None;
+    }
+
+    /// Compute path completions for the current command-line token and either
+    /// apply immediately (single match) or open the completion popup (multiple matches).
+    fn trigger_completion(&mut self) {
+        let cwd: PathBuf = match &self.active_panel().current_path {
+            VfsPath::Local(p) => p.clone(),
+            VfsPath::Archive { archive_path, .. } => {
+                archive_path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+            }
+        };
+
+        let input = self.cmdline.input.clone();
+
+        // Last token: everything after the last unquoted space.
+        let token_start = input.rfind(' ').map(|i| i + 1).unwrap_or(0);
+        let token = &input[token_start..];
+
+        // Split token at last '/' → (dir_prefix, file_prefix).
+        let (dir_str, file_prefix) = match token.rfind('/') {
+            Some(i) => (&token[..=i], &token[i + 1..]),
+            None    => ("", token),
+        };
+
+        // Resolve dir_str to an absolute path.
+        let base_dir: PathBuf = if dir_str.is_empty() {
+            cwd
+        } else if dir_str == "~" || dir_str == "~/" {
+            dirs::home_dir().unwrap_or_default()
+        } else if let Some(rel) = dir_str.strip_prefix("~/") {
+            dirs::home_dir().unwrap_or_default().join(rel)
+        } else if dir_str.starts_with('/') {
+            PathBuf::from(dir_str)
+        } else {
+            cwd.join(dir_str)
+        };
+
+        // List matching entries.
+        let mut completions: Vec<(String, bool)> = match std::fs::read_dir(&base_dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    if name.starts_with(file_prefix) {
+                        let is_dir = e.file_type().ok().map(|t| t.is_dir()).unwrap_or(false);
+                        Some((name, is_dir))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            Err(_) => return,
+        };
+
+        if completions.is_empty() { return; }
+
+        // Directories first, then alphabetically within each group.
+        completions.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        // Single match → apply without showing the popup.
+        if completions.len() == 1 {
+            let (name, is_dir) = completions.remove(0);
+            let suffix = if is_dir { format!("{name}/") } else { name };
+            let new_input = format!("{}{}{}", &input[..token_start], dir_str, suffix);
+            self.cmdline.clear();
+            self.cmdline.insert_str(&new_input);
+            debug!(input = %new_input, "completion: single match applied");
+            return;
+        }
+
+        // Multiple matches → open popup.
+        self.history_popup = None;
+        self.completion_popup = Some(CompletionPopupState {
+            selected_idx: 0,
+            completions,
+            token_start,
+            dir_prefix: dir_str.to_string(),
+        });
+        debug!(
+            count = self.completion_popup.as_ref().unwrap().completions.len(),
+            "completion popup: shown"
+        );
     }
 
     /// Clear the output buffer and reset the scroll position.

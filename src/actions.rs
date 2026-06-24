@@ -13,6 +13,7 @@
 //! | Ctrl+F6          | SortBySize              |
 //! | Ctrl+H           | ToggleHidden            |
 //! | Ctrl+F           | CmdlineInsertPath       |
+//! | Tab              | TabComplete (panels hidden) / switch panel (panels visible) |
 //! | Ctrl+Shift+C     | CopyAbsPathToClipboard  |
 //! | Ctrl+Alt+Shift+C | CopyOutputToClipboard   |
 //! | Ctrl+B           | OpenBookmarkManager     |
@@ -44,7 +45,9 @@ pub enum Action {
     NavigateUp,   // Bksp   — go to parent directory
 
     // ── Panel management ───────────────────────────────────────────────────
-    TogglePanel, // Tab — switch focus between left and right panel
+    /// Tab key: switch panel focus when panels are visible; trigger path
+    /// completion when both panels are hidden (Ctrl+O mode).
+    TabComplete,
 
     // ── Sorting ───────────────────────────────────────────────────────────
     SortByName,
@@ -221,7 +224,7 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
         KeyCode::Delete    => Action::CmdlineDeleteForward,
         KeyCode::Left      => Action::MoveLeft,
         KeyCode::Right     => Action::MoveRight,
-        KeyCode::Tab       => Action::TogglePanel,
+        KeyCode::Tab       => Action::TabComplete,
         KeyCode::Esc       => Action::PopupClose,  // app.rs decides if this clears search
         KeyCode::F(2)      => Action::Refresh,
         KeyCode::F(3)      => Action::View,
