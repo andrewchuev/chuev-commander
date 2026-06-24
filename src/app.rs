@@ -1253,6 +1253,16 @@ impl App {
                 self.pending_action = Some(PendingAction::ClipboardCopy(path_str));
             }
 
+            Action::CopyOutputToClipboard => {
+                if self.output_buffer.is_empty() {
+                    debug!("copy output: buffer is empty, nothing to copy");
+                } else {
+                    let text = self.output_buffer.join("\n");
+                    info!(lines = self.output_buffer.len(), "copy output: copied to clipboard");
+                    self.pending_action = Some(PendingAction::ClipboardCopy(text));
+                }
+            }
+
             // ── Bookmarks ─────────────────────────────────────────────────
             Action::BookmarkGoto(n) => {
                 let path = self.bookmarks[n as usize].clone();

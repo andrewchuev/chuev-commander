@@ -14,6 +14,7 @@
 //! | Ctrl+H           | ToggleHidden            |
 //! | Ctrl+F           | CmdlineInsertPath       |
 //! | Ctrl+Shift+C     | CopyAbsPathToClipboard  |
+//! | Ctrl+Alt+Shift+C | CopyOutputToClipboard   |
 //! | Ctrl+B           | OpenBookmarkManager     |
 //! | Ctrl+0..9        | BookmarkGoto(n)         |
 //! | Delete           | CmdlineDeleteForward    |
@@ -80,6 +81,7 @@ pub enum Action {
     // ── Clipboard ─────────────────────────────────────────────────────────
     CopyToClipboard,        // Ctrl+C  — copy selected/marked entry paths
     CopyAbsPathToClipboard, // Ctrl+Shift+C — always copy absolute path of current entry
+    CopyOutputToClipboard,  // Ctrl+Alt+Shift+C — copy full output buffer text
     PasteFromClipboard,     // Ctrl+V — paste clipboard text into cmdline
 
     // ── Command-line ───────────────────────────────────────────────────────
@@ -138,6 +140,14 @@ pub fn key_event_to_action(key: &KeyEvent) -> Action {
     let ctrl  = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt   = key.modifiers.contains(KeyModifiers::ALT);
+
+    // ── Ctrl+Alt+Shift combos (must come before Ctrl+Shift and plain Ctrl) ──
+    if ctrl && alt && shift {
+        return match key.code {
+            KeyCode::Char('c') | KeyCode::Char('C') => Action::CopyOutputToClipboard,
+            _ => Action::None,
+        };
+    }
 
     // ── Ctrl+Shift combos (must come before plain Ctrl check) ─────────────
     if ctrl && shift {
