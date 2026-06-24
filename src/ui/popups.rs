@@ -351,7 +351,9 @@ pub fn render_history_popup(
 ) {
     if matches.is_empty() { return; }
 
-    let n_items   = (matches.len() as u16).min(HISTORY_POPUP_MAX_ITEMS);
+    // Item 0 is the blank "execute-typed" sentinel; items 1..=n map to matches[0..n-1]
+    let total_items = matches.len() + 1;
+    let n_items   = (total_items as u16).min(HISTORY_POPUP_MAX_ITEMS);
     let hint_rows = 1_u16;
     let sep_rows  = 1_u16;
     let needed    = n_items + hint_rows + sep_rows;
@@ -388,19 +390,24 @@ pub fn render_history_popup(
 
     let item_w = popup_area.width.saturating_sub(4) as usize; // room for " ► "
 
-    let lines: Vec<Line> = matches.iter()
-        .enumerate()
+    let lines: Vec<Line> = (0..total_items)
         .skip(scroll)
         .take(list_h as usize)
-        .map(|(i, cmd)| {
+        .map(|i| {
             let is_sel = i == selected_idx;
             let style  = if is_sel { theme.history_popup_selected } else { theme.history_popup_item };
             let marker = if is_sel { "►" } else { " " };
-            let display = if cmd.chars().count() > item_w {
-                let t: String = cmd.chars().take(item_w.saturating_sub(1)).collect();
-                format!("{t}…")
+            // idx 0 = blank sentinel; idx > 0 = matches[i-1]
+            let display = if i == 0 {
+                String::new()
             } else {
-                cmd.clone()
+                let cmd = &matches[i - 1];
+                if cmd.chars().count() > item_w {
+                    let t: String = cmd.chars().take(item_w.saturating_sub(1)).collect();
+                    format!("{t}…")
+                } else {
+                    cmd.clone()
+                }
             };
             Line::from(Span::styled(format!(" {marker} {display}"), style))
         })
@@ -419,8 +426,8 @@ pub fn render_history_popup(
     // Key hint
     frame.render_widget(
         Paragraph::new(format!(
-            " ↑↓ navigate   Enter insert   Esc close   Shift+Del delete   ({}/{})",
-            selected_idx + 1, matches.len()
+            " ↑↓ navigate   Enter execute   Esc close   Shift+Del delete   ({}/{})",
+            selected_idx + 1, total_items
         ))
         .style(theme.history_popup_hint),
         hint_area,

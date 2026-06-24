@@ -1077,10 +1077,10 @@ impl App {
             }
             Action::MoveDown => {
                 if self.history_popup.is_some() {
+                    // total items = 1 empty + n matches; max valid idx = n
                     let n = self.cmdline.history_matches(&self.cmdline.input.clone()).len();
                     if let Some(ref mut p) = self.history_popup {
-                        let max = n.saturating_sub(1);
-                        if p.selected_idx < max { p.selected_idx += 1; }
+                        if p.selected_idx < n { p.selected_idx += 1; }
                     }
                 } else {
                     self.active_panel_mut().move_down();
@@ -1092,20 +1092,35 @@ impl App {
             Action::End      => { self.active_panel_mut().end(); }
 
             // ── Navigation ────────────────────────────────────────────────
-            // Enter: insert from history popup when open; else execute cmdline or navigate.
+            // Enter: execute from history popup when open; else execute cmdline or navigate.
+            // idx=0 is the blank "execute-typed" sentinel; idx>0 selects matches[idx-1].
             Action::NavigateInto => {
                 if self.history_popup.is_some() {
                     let input   = self.cmdline.input.clone();
                     let matches = self.cmdline.history_matches(&input);
                     let idx     = self.history_popup.as_ref().map(|p| p.selected_idx).unwrap_or(0);
-                    if let Some(cmd) = matches.get(idx) {
-                        let cmd = cmd.clone();
-                        debug!(cmd = %cmd, "history popup: command selected");
-                        self.cmdline.clear();
-                        self.cmdline.insert_str(&cmd);
-                    }
+
                     self.history_popup = None;
-                    self.history_popup_closed_for = self.cmdline.input.clone();
+                    self.history_popup_closed_for.clear();
+
+                    // Load history entry into cmdline when idx > 0
+                    if idx > 0 {
+                        if let Some(cmd) = matches.get(idx - 1) {
+                            let cmd = cmd.clone();
+                            debug!(cmd = %cmd, "history popup: command selected");
+                            self.cmdline.clear();
+                            self.cmdline.insert_str(&cmd);
+                        }
+                    }
+
+                    // Execute whatever is now in cmdline (either typed or loaded from history)
+                    if !self.cmdline.input.trim().is_empty() {
+                        let cmd = tokio::task::block_in_place(|| self.cmdline.take_input());
+                        if let VfsPath::Local(cwd) = self.active_panel().current_path.clone() {
+                            info!(cmd = %cmd, cwd = %cwd.display(), "shell: command enqueued");
+                            self.pending_action = Some(PendingAction::Shell { cmd, cwd });
+                        }
+                    }
                 } else if self.cmdline.input.is_empty() {
                     self.navigate_into();
                 } else {
@@ -1198,12 +1213,15 @@ impl App {
                     let input   = self.cmdline.input.clone();
                     let matches = self.cmdline.history_matches(&input);
                     let idx     = self.history_popup.as_ref().map(|p| p.selected_idx).unwrap_or(0);
-                    if let Some(entry) = matches.get(idx) {
-                        let entry = entry.clone();
-                        info!(entry = %entry, "history: entry deleted");
-                        tokio::task::block_in_place(|| self.cmdline.delete_entry(&entry));
-                    } else {
-                        debug!("history: Shift+Delete pressed but no entry at selected index");
+                    // idx 0 = blank sentinel item — nothing to delete
+                    if idx > 0 {
+                        if let Some(entry) = matches.get(idx - 1) {
+                            let entry = entry.clone();
+                            info!(entry = %entry, "history: entry deleted");
+                            tokio::task::block_in_place(|| self.cmdline.delete_entry(&entry));
+                        } else {
+                            debug!("history: Shift+Delete pressed but no entry at selected index");
+                        }
                     }
                     self.update_history_popup();
                 } else {
@@ -2333,7 +2351,8 @@ impl App {
                 self.history_popup = Some(HistoryPopupState { selected_idx: 0 });
             }
             if let Some(ref mut p) = self.history_popup {
-                p.selected_idx = p.selected_idx.min(n.saturating_sub(1));
+                // total items = 1 blank sentinel + n matches; max valid idx = n
+                p.selected_idx = p.selected_idx.min(n);
             }
         }
     }
